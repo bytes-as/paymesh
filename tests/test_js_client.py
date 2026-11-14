@@ -220,6 +220,24 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((c["buyer"], c["seller"], c["n"]), (addr, hub, 40))
         self.assertEqual(server.HUB.credits[cid], {server.SELLER.address: 15, self.paywall.wallet.address: 6})
 
+    def test_a_word_refused_after_the_open_was_mined_keeps_the_channel(self):
+        """The seller mines an opening payload's channel_open, then checks the word. If only the
+        word is refused (invalid_paymesh_channel_payment), the deposit is on chain and the key
+        moved on: the client must keep the channel (spent 0) and the next key, not lock itself."""
+        seed, addr = self.funded()
+        out = js("const w = new P.Wallet(P.unhex(input.seed)); const c = new P.Client(input.url, w, null, { channelTicks: 20 });"
+                 "const real = c._pay.bind(c); let first = true;"
+                 "c._pay = (path, acc, payload) => {"  # spoil the first opening payload's word only
+                 "  if (first && payload.open) { first = false; payload = Object.assign({}, payload, { word: '00'.repeat(32) }); }"
+                 "  return real(path, acc, payload); };"
+                 "const a = await c.get('/premium/price'); const b = await c.get('/premium/price');"
+                 "const ch = Object.values(w.channels)[0];"
+                 "return [a.status, a.receipt.errorReason, b.status, b.via, w.locked, w.nextIndex, ch && ch.spent, ch && ch.id];",
+                 {"seed": seed.hex(), "url": f"http://127.0.0.1:{self.port}"})
+        self.assertEqual(out[:7], [402, "invalid_paymesh_channel_payment", 200, "channel", None, 1, 5])
+        c = self.chain.ledger.channels[out[7]]
+        self.assertEqual((c["buyer"], c["n"], c["open"]), (addr, 20, True))  # one deposit, still usable
+
     def test_the_js_client_pays_a_route_twice(self):
         seed = os.urandom(32)
         addr = wallets.Wallet("jsbuyer", seed).address

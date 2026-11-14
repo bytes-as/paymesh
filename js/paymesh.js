@@ -364,11 +364,17 @@
         kind: "channel_open", anchor: c.anchor, ticks: c.n, unit, expires: accepted.extra.height + CHANNEL_EXPIRES };
       signTx(op, w, i);
       const [r, receipt] = await this._pay(path, accepted, { open: op, tick: ticks, word: c.words[ticks] });
-      this._keyUsed(i, r, receipt);
-      if (r.status === 200 || (receipt && receipt.errorReason === "settlement_pending")) {
+      // The seller mines the open first and checks the word after: invalid_paymesh_channel_payment
+      // means the open is on chain and only the word was refused. Keep that deposit (nothing spent)
+      // and move to the next key; any other refusal saw the signature without mining it: lock.
+      const why = receipt && receipt.errorReason;
+      if (r.status === 200 || why === "settlement_pending" || why === "invalid_paymesh_channel_payment") {
+        w.nextIndex = i + 1;
         c.id = op.txid;
         c.spent = r.status === 200 ? ticks : 0;
         w.channels[seller] = c;
+      } else {
+        w.locked = i;
       }
       this.onSave(w);
       return { status: r.status, body: r.body, receipt, paid: r.status === 200, via: "channel-open", tx: op };
