@@ -30,9 +30,11 @@ class PaymentError(Exception):
 
 class Client:
     SAVE_EVERY = 64  # calls between saves of the channel state (resynced from the seller on start)
-    def __init__(self, api: str, wallet: str, timeout: float = 10.0):
+    def __init__(self, api: str, wallet: str, timeout: float = 10.0, node: str | None = None):
+        """api: the paid service. node: the paymesh node (txs, balances, faucet);
+        the same server unless the seller runs its API apart from the node."""
         self.api = api.rstrip("/")
-        self.base_path = urllib.parse.urlsplit(self.api).path
+        self.node = (node or api).rstrip("/")
         self._tl = threading.local()
         self.wallet = wallets.load_or_create(wallet)
         self.timeout = timeout
@@ -44,41 +46,47 @@ class Client:
         self._load_channel()
 
     # --- HTTP ---
-    def _conn(self):
-        """This thread's kept-alive connection. Connect blocking, then set the timeout:
-        on Windows a timed connect costs ~15 ms per request."""
-        c = getattr(self._tl, "conn", None)
+    def _conn(self, base):
+        """This thread's kept-alive connection to `base`. Connect blocking, then set the
+        timeout: on Windows a timed connect costs ~15 ms per request."""
+        conns = self._tl.__dict__.setdefault("conns", {})
+        c = conns.get(base)
         if c is None:
-            u = urllib.parse.urlsplit(self.api)
+            u = urllib.parse.urlsplit(base)
             c = http.client.HTTPConnection(u.hostname, u.port or 80)
             c.sock = socket.create_connection((u.hostname, u.port or 80))
             c.sock.settimeout(self.timeout)
             c.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            self._tl.conn, self._tl.fresh = c, True
+            conns[base] = c
+            self._tl.fresh = True
         return c
 
-    def _drop(self):
-        c = getattr(self._tl, "conn", None)
+    def _drop(self, base):
+        c = self._tl.__dict__.get("conns", {}).pop(base, None)
         if c is not None:
             c.close()
-        self._tl.conn = None
 
-    def _req(self, path, data=None, headers=None):
+    def _node(self, path, data=None, headers=None):
+        return self._req(path, data, headers, base=self.node)
+
+    def _req(self, path, data=None, headers=None, base=None):
+        base = base or self.api
         body = json.dumps(data).encode() if data is not None else None
         h = {"Content-Type": "application/json"} if body else {}
         h.update(headers or {})
         for _ in range(2):
-            c = self._conn()
-            reused, self._tl.fresh = not self._tl.fresh, False
+            self._tl.fresh = False
+            c = self._conn(base)
+            reused = not self._tl.fresh
             try:
-                c.request("POST" if body is not None else "GET", self.base_path + path, body=body, headers=h)
+                c.request("POST" if body is not None else "GET", urllib.parse.urlsplit(base).path + path, body=body, headers=h)
                 r = c.getresponse()
                 raw = r.read().decode()
                 if r.will_close:
-                    self._drop()
+                    self._drop(base)
                 break
             except (http.client.HTTPException, OSError):
-                self._drop()
+                self._drop(base)
                 if not reused:  # a fresh connection failed: the server is down
                     raise
                 # the server closed an idle kept-alive connection: retry once on a new one
@@ -89,7 +97,7 @@ class Client:
 
     def _ledger(self) -> "_Remote":
         """The server's view of this wallet: balance, current key, chain height."""
-        code, info = self._req(f"/account?address={self.wallet.address}")
+        code, info = self._node(f"/account?address={self.wallet.address}")
         if code != 200:
             raise PaymentError(f"account: {info}")
         return _Remote(info)
@@ -98,13 +106,13 @@ class Client:
         return self._ledger().balance
 
     def faucet(self) -> dict:
-        code, body = self._req(f"/faucet?address={self.wallet.address}")
+        code, body = self._node(f"/faucet?address={self.wallet.address}")
         if code != 200:
             raise PaymentError(f"faucet: {body}")
         return body
 
     def _submit(self, tx) -> dict:
-        code, body = self._req("/tx", tx)
+        code, body = self._node("/tx", tx)
         if code != 200:
             raise PaymentError(f"tx refused: {body.get('error') if isinstance(body, dict) else body}")
         return body

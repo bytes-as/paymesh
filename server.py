@@ -198,6 +198,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "channels": {k: v for k, v in chain_inst.ledger.channels.items() if v["buyer"] == addr and v["open"]}}
             self._send(200, info)
             return
+        if self.path.startswith("/tx?") or self.path.startswith("/channel/info"):
+            # read-only lookups for seller services running apart from the node
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            key = (q.get("id") or [""])[0]
+            if self.path.startswith("/tx?"):
+                tx, blk = chain_inst.find_tx_by_id(key)
+                if tx is None:
+                    self._send(404, {"error": "no mined tx with that id"})
+                else:
+                    self._send(200, {"tx": {k: v for k, v in tx.items() if k not in ("sig", "pub")}, "block": blk.index})
+            else:
+                with chain_lock:
+                    c = chain_inst.ledger.channels.get(key)
+                    c = dict(c) if c else None
+                self._send(200, c) if c else self._send(404, {"error": "unknown channel"})
+            return
         if self.path.startswith("/stats"):
             self._send(200, STATS.view())
             return
