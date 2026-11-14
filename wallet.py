@@ -3,8 +3,8 @@
     py -3 wallet.py new <name> [--encrypt]     create a wallet (keys stay in wallets/);
                                                --encrypt seals its seed with PAYMESH_PASSPHRASE
     py -3 wallet.py address <name>
-    py -3 wallet.py balance <name>
-    py -3 wallet.py faucet <name>              demo money: +100 PMX
+    py -3 wallet.py balance <name|address>
+    py -3 wallet.py faucet <name|address>      demo money: +100 PMX (an address: e.g. a browser wallet's)
     py -3 wallet.py send <name> <to> <amount> [memo]
                                                <to> is an address or a local wallet name
     py -3 wallet.py history <name> [n]         last n txs to or from this wallet
@@ -46,6 +46,15 @@ def main(argv):
         print(__doc__)
         return 0
     cmd, name = argv[0], argv[1]
+    if cmd in ("faucet", "balance") and ch.HEX64.match(name):  # a wallet held elsewhere (a browser page)
+        import urllib.request
+        if cmd == "faucet":
+            with urllib.request.urlopen(f"{API}/faucet?address={name}", timeout=30) as r:
+                r.read()
+        with urllib.request.urlopen(f"{API}/account?address={name}", timeout=30) as r:
+            bal = json.load(r)["balance"]
+        print(json.dumps({"address": name, "balance": bal, "currency": "PMX"}))
+        return 0
     if cmd == "new":
         pw = None
         if "--encrypt" in argv[2:]:
