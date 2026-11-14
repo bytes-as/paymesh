@@ -179,6 +179,23 @@ class Node(unittest.TestCase):
         self.assertEqual(c.balance(), 100)  # refused before it was put on chain
         self.assertIsNone(self.chain.find_tx_by_id(tx["txid"])[0])
 
+    def test_refused_tx_retires_the_key_that_signed_it(self):
+        """A seller that refuses a signed tx (and might keep it) never sees a second signature
+        from that one-time key: the client rotates it with a self-payment first."""
+        from paymesh_client import PaymentError
+        c = Client(self.url, "x402-retire")
+        c.faucet()
+        _, offers = self.challenge()
+        bogus = dict(offers["tx"], extra=dict(offers["tx"]["extra"], memo=f"{offers['tx']['payTo']}:{'0' * 32}:5"))
+        i = c.wallet.index_of(self.chain.current_key(c.wallet.address))
+        with self.assertRaises(PaymentError):
+            c._on_chain("/premium/price", bogus)  # unknown nonce: refused before it is put on chain
+        # the self-pay (key i, sent only to the node) moved the ledger to key i+1: the seller's
+        # copy, signed by key i, can never be mined or extended
+        self.assertEqual(self.chain.current_key(c.wallet.address), c.wallet.key_fp(i + 1))
+        self.assertEqual(c.balance(), 100)  # the self-payment moves nothing
+        self.assertEqual(c.get("/premium/price")[0], 200)  # and paying works on the next key
+
     def test_malformed_payment_signature_is_400(self):
         code, hdrs, body = self.raw("/premium/price", {x402.SIGNATURE: "not base64!"})
         self.assertEqual(code, 400)

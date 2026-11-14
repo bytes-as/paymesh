@@ -257,8 +257,29 @@ class Client:
             payload = {"txid": tx["txid"]}
         code, body = self._pay(path, accepted, payload)
         if code in (400, 402):
-            raise PaymentError(f"payment refused: {self._refusal(body)}")
+            why = self._refusal(body)
+            if "transaction" in payload:
+                self._retire_key(tx)
+            raise PaymentError(f"payment refused: {why}")
         return code, body
+
+    def _retire_key(self, exposed: dict):
+        """The seller saw `exposed`, signed by a one-time key, and refused it. Before that key
+        signs anything else (a retry would), move the ledger past it with a 1 PMX payment to
+        ourselves, sent to the node: the seller never holds two signatures from one key."""
+        led = self._ledger()
+        if led.current_key(self.wallet.address) == exposed["next_key"]:
+            return  # the exposed tx got mined after all: the key already rotated
+        if led.balance < 1:
+            raise PaymentError("payment refused and the signing key could not be retired (balance 0): "
+                               "fund the wallet before paying again")
+        tx = led.new_tx(self.wallet.address, self.wallet.address, 1, "retire-key")
+        wallets.sign_tx(tx, self.wallet, led)
+        try:
+            self._submit(tx)
+        except PaymentError:
+            if self._ledger().current_key(self.wallet.address) != exposed["next_key"]:
+                raise  # the seller mined the exposed tx meanwhile, or this failed: only the first is fine
 
 
 class _Remote:
