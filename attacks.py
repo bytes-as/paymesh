@@ -124,6 +124,40 @@ def run(node: str) -> list:
         pass
     victim._pay = real_pay
     attempt("x402: a seller mines a refused tx it kept", lambda: post(kept[0]), no)
+    # --- channel expiry (QA-PM-1, QA-PM-2) ---
+    attempt("channel tick written as a superscript 2 to crash the request",
+            lambda: me._req("/premium/price", headers={"X-Channel": f"{me.channel.id} ² {'ab' * 32}"}),
+            lambda c, b: c == 402)
+    import channels as chn
+    height = lambda: me._node("/health")[1]["chain_blocks"]  # noqa: E731
+
+    def raw_channel(expires_in):
+        bc = chn.BuyerChannel(50)
+        led = victim._ledger()
+        t = led.new_tx(victim.wallet.address, seller, 50, "channel:open")
+        t.update(kind="channel_open", anchor=bc.anchor, ticks=50, unit=1, expires=height() + expires_in)
+        wallets.sign_tx(t, victim.wallet, led)
+        post(t)
+        bc.id = t["txid"]
+        return bc, t["expires"]
+
+    near, _ = raw_channel(2)
+    attempt("buy on a channel that is refundable next block, then refund it",
+            lambda: me._req("/premium/price", headers={"X-Channel": near.pay(5)}), lambda c, b: c == 402)
+    race, exp = raw_channel(chn.SellerBook.STOP_WITHIN + 3)
+    served = [me._req("/premium/price", headers={"X-Channel": race.pay(5)})[0] for _ in range(2)].count(200)
+    while height() < exp:
+        me._node(f"/faucet?address={'ee' * 32}")  # each mint is a block: race the settler
+
+    def refund():
+        led = victim._ledger()
+        t = led.new_tx(victim.wallet.address, victim.wallet.address, 50, "channel:refund")
+        t.update(kind="channel_refund", channel=race.id)
+        wallets.sign_tx(t, victim.wallet, led)
+        post(t)
+        return 200, me._node(f"/channel/info?id={race.id}")[1]
+    attempt("spend a channel, mine blocks fast, refund before the seller settles", refund,
+            lambda c, b: served > 0 and b.get("paid") == served * 5)
     attempt("wallet name that escapes the wallet folder", lambda: me._node("/faucet?name=../../evil"), no)
     attempt("malformed JSON body", lambda: raw_post(node, "/tx", b"{"), lambda c, b: c == 400)
     attempt("node still healthy afterwards", lambda: me._node("/health"), lambda c, b: c == 200)
