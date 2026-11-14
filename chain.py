@@ -23,6 +23,7 @@ import re
 import threading
 import time
 
+import durable
 import wallets
 
 DIFFICULTY = 2  # hash must start with this many zeros; tuned so block time < 1s
@@ -41,6 +42,13 @@ FIELDS = {"faucet": _BASE | {"kind"}, "pay": _SIGNED,
           "channel_close": _SIGNED | {"channel", "ticks", "word"},
           "channel_refund": _SIGNED | {"channel"}}
 FORMAT = 3  # chain.json: a {"format": 3} line, then one block per line (append-only)
+
+
+def _is_json_line(raw: bytes) -> bool:
+    try:
+        return isinstance(json.loads(raw.decode("utf-8")), dict)
+    except (UnicodeDecodeError, ValueError):
+        return False
 
 
 def sha256_hex(s: str) -> str:
@@ -251,6 +259,9 @@ class Chain:
 
     # --- persistence ---
     def load(self):
+        cut = durable.repair_tail(self.path, _is_json_line)  # a block cut off by a crash mid-write
+        if cut:
+            print(f"[chain] dropped {cut} bytes of a partly written last block in {self.path}")
         with open(self.path, "r", encoding="utf-8") as f:
             text = f.read()
         upgrade = False
@@ -296,12 +307,8 @@ class Chain:
 
     def save(self):
         """Write the whole chain (genesis, upgrades). Mining appends instead."""
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps({"format": FORMAT}) + "\n")
-            for b in self.blocks:
-                f.write(json.dumps(b.to_dict()) + "\n")
-        os.replace(tmp, self.path)
+        lines = [json.dumps({"format": FORMAT})] + [json.dumps(b.to_dict()) for b in self.blocks]
+        durable.atomic_write(self.path, ("\n".join(lines) + "\n").encode("utf-8"), durable.must_sync(True))
 
     # --- checkpoints: the ledger as of a block, so a restart skips old signatures ---
     def _ckpt_path(self) -> str:
@@ -312,10 +319,7 @@ class Chain:
         data = {"height": self.height, "tip": self.blocks[-1].hash(),
                 "ledger": {"balances": lg.balances, "keys": lg.keys, "txids": sorted(lg.txids),
                            "channels": lg.channels, "height": lg.height}}
-        tmp = self._ckpt_path() + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, self._ckpt_path())
+        durable.atomic_write(self._ckpt_path(), json.dumps(data).encode("utf-8"), durable.must_sync(True))
 
     def _read_checkpoint(self, blocks):
         """(height, Ledger) from the checkpoint if it matches these blocks, else None."""
@@ -352,9 +356,12 @@ class Chain:
         return same
 
     def _append(self, b: Block):
-        """Add one block to the file: cost stays flat as the chain grows."""
-        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(b.to_dict()) + "\n")
+        """Add one block to the file: cost stays flat as the chain grows. On disk (fsync)
+        before mine() returns, so no tx is answered "mined" that a power cut could undo."""
+        with open(self.path, "ab") as f:
+            f.write((json.dumps(b.to_dict()) + "\n").encode("utf-8"))
+            if durable.must_sync(True):
+                durable.fsync_file(f)
 
     @classmethod
     def open_or_archive(cls, path=CHAIN_FILE):

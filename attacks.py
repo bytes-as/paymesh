@@ -25,7 +25,8 @@ def _free_port():
         return s.getsockname()[1]
 
 
-def run(node: str) -> list:
+def run(node: str, restart=None) -> list:
+    """restart(): kill the node without cleanup and start it again on the same data (scratch only)."""
     import chain as ch
     import wallets
     from paymesh_client import Client
@@ -160,6 +161,13 @@ def run(node: str) -> list:
             lambda c, b: served > 0 and b.get("paid") == served * 5)
     attempt("wallet name that escapes the wallet folder", lambda: me._node("/faucet?name=../../evil"), no)
     attempt("malformed JSON body", lambda: raw_post(node, "/tx", b"{"), lambda c, b: c == 400)
+    if restart:  # the seller logs a tick before it serves: a crash can't make a word new again
+        h = me.channel.pay(5)
+        first = me._req("/premium/price", headers={"X-Channel": h})[0]
+        restart()
+        attempt("replay a channel word after the node was killed and restarted",
+                lambda: me._req("/premium/price", headers={"X-Channel": h}),
+                lambda c, b: first == 200 and c == 402 and "not after the last paid tick" in str(b))
     attempt("node still healthy afterwards", lambda: me._node("/health"), lambda c, b: c == 200)
     return results
 
@@ -177,24 +185,32 @@ def raw_post(node: str, path: str, body: bytes):
 
 def main():
     node = sys.argv[1] if len(sys.argv) > 1 else None
-    proc = None
+    procs, restart = [], None
     if node is None:
         home, port = tempfile.mkdtemp(), _free_port()
         env = dict(os.environ, PAYMESH_HOME=home, PAYMESH_API_PORT=str(port), PAYMESH_EXPLORER_PORT=str(_free_port()))
-        proc = subprocess.Popen([sys.executable, os.path.join(HERE, "paymesh.py"), "serve"], env=env,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         node = f"http://127.0.0.1:{port}"
-        for _ in range(100):
-            try:
-                urllib.request.urlopen(node + "/health", timeout=1).close()
-                break
-            except OSError:
-                time.sleep(0.1)
+
+        def start():
+            procs.append(subprocess.Popen([sys.executable, os.path.join(HERE, "paymesh.py"), "serve"], env=env,
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            for _ in range(100):
+                try:
+                    urllib.request.urlopen(node + "/health", timeout=1).close()
+                    return
+                except OSError:
+                    time.sleep(0.1)
+
+        def restart():
+            procs[-1].kill()  # TerminateProcess: no shutdown code runs
+            procs[-1].wait()
+            start()
+        start()
     try:
-        res = run(node)
+        res = run(node, restart)
     finally:
-        if proc:
-            proc.kill()
+        for p in procs:
+            p.kill()
     width = max(len(r["attack"]) for r in res)
     for r in res:
         mark = "REFUSED" if r["refused"] else "ACCEPTED (!)"

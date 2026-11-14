@@ -20,6 +20,7 @@ import secrets
 import threading
 
 import chain as ch
+import durable
 import wallets
 
 
@@ -79,26 +80,30 @@ class SellerBook:
         self.lock = threading.Lock()
         self.book: dict = {}
         self._lines = 0
+        cut = durable.repair_tail(path, lambda raw: _record_ok(raw.decode("utf-8", "replace")))
+        if cut:
+            print(f"[channels] dropped {cut} bytes of a partly written last record in {path}")
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
-                    parts = line.split()
-                    if len(parts) == 3 and parts[1].isascii() and parts[1].isdigit():  # a torn last line is skipped
-                        cid, i, w = parts[0], int(parts[1]), parts[2]
-                        if i > self.book.get(cid, {"i": 0})["i"]:
-                            self.book[cid] = {"i": i, "w": w}
-                        self._lines += 1
+                    if not _record_ok(line):
+                        continue  # never take a damaged record as the best word
+                    cid, i, w = line.split()
+                    if int(i) > self.book.get(cid, {"i": 0})["i"]:
+                        self.book[cid] = {"i": int(i), "w": w}
+                    self._lines += 1
+        self.log = durable.AppendLog(path)  # fsync policy: durable.py
+
     def _record(self, cid: str, i: int, w: str):
-        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
-            f.write(f"{cid} {i} {w}\n")
+        self.log.append(f"{cid} {i} {w}")
         self._lines += 1
         if self._lines > self.COMPACT_AT:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-                for c, v in self.book.items():
-                    f.write(f"{c} {v['i']} {v['w']}\n")
-            os.replace(tmp, self.path)
+            data = "".join(f"{c} {v['i']} {v['w']}\n" for c, v in self.book.items()).encode()
+            self.log.reopen(lambda: durable.atomic_write(self.path, data, sync=durable.POLICY != "off"))
             self._lines = len(self.book)
+
+    def close(self):
+        self.log.close()
 
     def accept(self, chain_, header: str, price: int) -> tuple[bool, str]:
         """Check an X-Channel header pays `price` PMX; record it if so."""
@@ -157,6 +162,13 @@ class SellerBook:
         with chain_.lock:
             return [cid for cid, c in chain_.ledger.channels.items()
                     if c["open"] and c["seller"] == self.seller and cid in self.book and c["expires"] - h <= within]
+
+
+def _record_ok(line: str) -> bool:
+    """A complete seller-log record: '<64 hex channel> <ASCII digits> <64 hex word>'."""
+    parts = line.split()
+    return (len(parts) == 3 and ch.HEX64.match(parts[0]) is not None and parts[1].isascii()
+            and parts[1].isdigit() and ch.HEX64.match(parts[2]) is not None)
 
 
 def refund_tx(chain_, wallet, cid: str) -> dict:

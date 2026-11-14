@@ -23,6 +23,8 @@ import os
 import re
 import secrets
 
+import durable
+
 # PAYMESH_HOME holds chain.json and wallets/ (default: this folder)
 HOME = os.environ.get("PAYMESH_HOME") or os.path.dirname(os.path.abspath(__file__))
 WALLET_DIR = os.path.join(HOME, "wallets")
@@ -190,12 +192,11 @@ class Wallet:
             d["seed"] = self.seed.hex()
         return d
 
-    def save(self):
+    def save(self, sync: bool = False):
+        """sync: fsync before the rename (a new seed: losing it loses the money). The key
+        hint saved after each signature needs none: the ledger says which key is current."""
         os.makedirs(WALLET_DIR, exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f)
-        os.replace(tmp, self.path)
+        durable.atomic_write(self.path, json.dumps(self.to_dict()).encode("utf-8"), sync and durable.must_sync(True))
 
 
 def _path(name: str) -> str:
@@ -209,7 +210,7 @@ def create(name: str, passphrase: str | None = None) -> Wallet:
     w = Wallet(name, secrets.token_bytes(32))
     if passphrase:
         w.sealed = seal_seed(w.seed, passphrase)
-    w.save()
+    w.save(sync=True)
     return w
 
 

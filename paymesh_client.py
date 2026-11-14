@@ -21,6 +21,7 @@ import urllib.parse
 
 import chain as ch
 import channels
+import durable
 import wallets
 import paymesh_x402 as x402
 class PaymentError(Exception):
@@ -122,13 +123,13 @@ class Client:
     def _channel_file(self):
         return os.path.join(wallets.WALLET_DIR, "channels", f"{self.wallet.name}.json")
 
-    def _save_channel(self):
+    def _save_channel(self, sync: bool = False):
+        """sync on open (the hash chain's seed); later saves only move `spent`, which the
+        seller's /channel/state corrects on the next start."""
         c = self.channel
         os.makedirs(os.path.dirname(self._channel_file()), exist_ok=True)
-        tmp = self._channel_file() + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"id": c.id, "seed": c.seed.hex(), "ticks": c.n, "spent": c.spent, "terms": self.terms}, f)
-        os.replace(tmp, self._channel_file())
+        data = {"id": c.id, "seed": c.seed.hex(), "ticks": c.n, "spent": c.spent, "terms": self.terms}
+        durable.atomic_write(self._channel_file(), json.dumps(data).encode("utf-8"), sync and durable.must_sync(True))
 
     def _load_channel(self):
         p = self._channel_file()
@@ -161,9 +162,17 @@ class Client:
         led = self._ledger()
         c = channels.BuyerChannel(ticks)
         tx = c.open_tx(led, self.wallet, terms["seller"], terms["unit"], expires_in)
-        self._submit(tx)
+        # the seed goes to disk before the deposit goes on chain: a crash in between leaves a
+        # file for a channel that never opened (dropped on the next start), never a deposit
+        # whose hash chain is lost
         self.channel, self.terms = c, terms
-        self._save_channel()
+        self._save_channel(sync=True)
+        try:
+            self._submit(tx)
+        except (PaymentError, OSError):
+            self.channel = None
+            os.remove(self._channel_file())
+            raise
         return c.id
 
     def close_channel(self) -> dict:
