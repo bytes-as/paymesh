@@ -259,9 +259,14 @@ class Chain:
 
     # --- persistence ---
     def load(self):
-        cut = durable.repair_tail(self.path, _is_json_line)  # a block cut off by a crash mid-write
-        if cut:
-            print(f"[chain] dropped {cut} bytes of a partly written last block in {self.path}")
+        with open(self.path, "rb") as f:
+            first = f.readline()
+        if first.strip() == json.dumps({"format": FORMAT}).encode():
+            # format 3 only: older formats are one JSON document, not lines; their last
+            # line ("]" or "}") must never be taken for a torn block (they get archived)
+            cut = durable.repair_tail(self.path, _is_json_line)  # a block cut off by a crash mid-write
+            if cut:
+                print(f"[chain] dropped {cut} bytes of a partly written last block in {self.path}")
         with open(self.path, "r", encoding="utf-8") as f:
             text = f.read()
         upgrade = False

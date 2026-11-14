@@ -1,6 +1,7 @@
 """Crash recovery: files cut at every point of their last record, and a real writer
 process killed mid-run again and again. Nothing acknowledged is lost, a torn record is
 never taken as data, and the next append after a crash survives the next reload."""
+import json
 import os
 import random
 import subprocess
@@ -85,6 +86,28 @@ class TornTail(unittest.TestCase):
         with open(path + ".ckpt", "wb") as f:
             f.write(b"\x00" * 64)  # a power cut left zeros: ignored, full replay
         self.assertEqual(len(ch.Chain(path).blocks), 2)
+
+    def test_older_chain_formats_are_never_cut(self):
+        """A format 1/2 chain is one JSON document whose last line is ']' or '}': torn-tail
+        repair must leave it alone (it is archived or upgraded, never trimmed)."""
+        path, _ = self.chain_file(2)
+        blocks = [b.to_dict() for b in ch.Chain(path).blocks]
+        for doc in (blocks, {"format": 2, "blocks": blocks}):
+            text = json.dumps(doc, indent=1).replace("\n", "\r\n")  # as the old writer left it: no final newline
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+            before = os.path.getsize(path)
+            if isinstance(doc, list):
+                with self.assertRaises(ValueError):  # format 1: refused, archived by open_or_archive
+                    ch.Chain(path)
+                self.assertEqual(os.path.getsize(path), before)
+                c = ch.Chain.open_or_archive(path)
+                aside = [n for n in os.listdir(self.tmp.name) if ".v1-" in n]
+                self.assertEqual(len(aside), 1)
+                self.assertEqual(os.path.getsize(os.path.join(self.tmp.name, aside[0])), before)
+                os.remove(os.path.join(self.tmp.name, aside[0]))
+            else:
+                self.assertEqual(len(ch.Chain(path).blocks), 2)  # format 2: upgraded in place
 
     def test_policy_values(self):
         self.assertIn(durable.POLICY, ("safe", "strict", "off"))
