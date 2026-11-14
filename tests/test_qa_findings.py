@@ -105,5 +105,76 @@ class QAFindings(unittest.TestCase):
         self.assertEqual(self.chain.ledger.channels[bc.id].get("paid", 0), served * 5)
 
 
+class QARemoteSeller(unittest.TestCase):
+    """A seller running apart from the node (paymesh_seller): the node cannot settle for it."""
+
+    @classmethod
+    def setUpClass(cls):
+        import threading
+        from wsgiref.simple_server import make_server
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "examples"))
+        import weather_api
+        from test_seller import Quiet
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls._wd = wallets.WALLET_DIR
+        wallets.WALLET_DIR = os.path.join(cls.tmp.name, "wallets")
+        cls.chain = ch.Chain.open_or_archive(os.path.join(cls.tmp.name, "chain.json"))
+        cls.nport, cls.sport = free_port(), free_port()
+        cls.node_srv = server.start(cls.chain, port=cls.nport)
+        cls.node = f"http://127.0.0.1:{cls.nport}"
+        cls.paywall, app = weather_api.build(cls.node)
+        cls.httpd = make_server("127.0.0.1", cls.sport, app, server_class=weather_api.ThreadingWSGIServer, handler_class=Quiet)
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.paywall.stop.set()
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.node_srv.settler_stop.set()
+        cls.node_srv.shutdown()
+        cls.node_srv.server_close()
+        wallets.WALLET_DIR = cls._wd
+        cls.tmp.cleanup()
+
+    def _get(self, path, headers):
+        conn = http.client.HTTPConnection("127.0.0.1", self.sport, timeout=10)
+        try:
+            conn.request("GET", path, headers=headers)
+            r = conn.getresponse()
+            r.read()
+            return r.status
+        finally:
+            conn.close()
+
+    # QA-PM-3: QA-PM-2b's race against a remote seller. Pay just outside STOP_WITHIN, mine
+    # past `expires` with faucet calls (one block each), refund: the node settles first only
+    # for its own seller, the remote seller's settler polls every 2 s and loses.
+    @unittest.expectedFailure
+    def test_qa_pm_3_remote_seller_refund_race(self):
+        cl = Client(self.node, "qa-remote-racer")
+        cl.faucet()
+        seller = self.paywall.wallet.address
+        bc = channels.BuyerChannel(30)
+        led = cl._ledger()
+        tx = led.new_tx(cl.wallet.address, seller, 30, "channel:open")
+        expires = self.chain.height + channels.SellerBook.STOP_WITHIN + 3
+        tx.update(kind="channel_open", anchor=bc.anchor, ticks=30, unit=1, expires=expires)
+        wallets.sign_tx(tx, cl.wallet, led)
+        self.assertEqual(cl._req("/tx", tx)[0], 200)
+        bc.id = tx["txid"]
+        served = sum(self._get("/forecast", {"X-Channel": bc.pay(3)}) == 200 for _ in range(4))
+        self.assertGreater(served, 0)
+        while self.chain.height < expires:
+            cl._node(f"/faucet?address={'ee' * 32}")
+        led = cl._ledger()
+        rtx = led.new_tx(cl.wallet.address, cl.wallet.address, 30, "channel:refund")
+        rtx.update(kind="channel_refund", channel=bc.id)
+        wallets.sign_tx(rtx, cl.wallet, led)
+        cl._req("/tx", rtx)
+        paid = self.chain.ledger.channels[bc.id].get("paid", 0)
+        self.assertEqual(paid, served * 3, f"remote seller served {served} calls, was paid {paid} PMX")
+
+
 if __name__ == "__main__":
     unittest.main()
