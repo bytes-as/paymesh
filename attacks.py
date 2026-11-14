@@ -203,6 +203,18 @@ def run(node: str, restart=None) -> list:
         return x402_pay(fresh()["channel"], {"channel": cid, "tick": int(i), "word": w})
     attempt("x402: buy on a channel that is refundable next block", near_x402,
             lambda c, b: c == 402 and "too close to settle" in str(me.last_receipt()))
+
+    def open_for_someone_else():  # a channel opened inside a payment, locking money for another seller
+        offer = fresh()["channel"]
+        bc = chn.BuyerChannel(10)
+        led = victim._ledger()
+        t = led.new_tx(victim.wallet.address, "5a" * 32, 10, "channel:open")
+        t.update(kind="channel_open", anchor=bc.anchor, ticks=10, unit=1, expires=offer["extra"]["height"] + 100)
+        wallets.sign_tx(t, victim.wallet, led)
+        code, body = x402_pay(offer, {"open": t, "tick": 5, "word": bc.words[5]})
+        return code, {"receipt": me.last_receipt(), "mined": me._node(f"/tx?id={t['txid']}")[0]}
+    attempt("x402: open a channel to another seller inside a payment", open_for_someone_else,
+            lambda c, b: c == 402 and b["mined"] == 404)
     race, exp = raw_channel(chn.SellerBook.STOP_WITHIN + 3)
     served = [me._req("/premium/price", headers={"X-Channel": race.pay(5)})[0] for _ in range(2)].count(200)
     while height() < exp:
