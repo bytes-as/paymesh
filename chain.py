@@ -338,7 +338,7 @@ class Ledger:
                 ch["refund_at"] = self.time + REFUND_WINDOW_S
             else:  # step 2 (or a refund from before the epoch): the deposit comes back
                 self.balances[frm] = self.balances.get(frm, 0) + amt - fee
-                ch.update(open=False, paid=0)
+                ch.update(open=False, paid=ch.get("paid_ticks", 0) * ch["unit"])  # payouts before stay paid
         self.txids.add(tx["txid"])
 
 
