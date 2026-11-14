@@ -89,5 +89,74 @@ class SellerApart(unittest.TestCase):
                 c.get("/forecast")
 
 
+class SellerOffline(unittest.TestCase):
+    """QA-PM-3 without trusting timing: the separate seller's settler is DOWN while the buyer
+    spends, mines past expiry and asks for a refund, and the node holds nothing. The seller
+    comes back within the refund window, closes with its best word, and is paid."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls._wd = wallets.WALLET_DIR
+        wallets.WALLET_DIR = os.path.join(cls.tmp.name, "wallets")
+        cls.chain = ch.Chain.open_or_archive(os.path.join(cls.tmp.name, "chain.json"))
+        cls.nport, cls.sport = free_port(), free_port()
+        cls.node_srv = server.start(cls.chain, port=cls.nport)
+        cls.node = f"http://127.0.0.1:{cls.nport}"
+        cls.paywall, app = weather_api.build(cls.node, wallet="offline-shop")
+        cls.paywall.stop.set()  # its settler is down
+        cls.httpd = make_server("127.0.0.1", cls.sport, app, server_class=weather_api.ThreadingWSGIServer, handler_class=Quiet)
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.api = f"http://127.0.0.1:{cls.sport}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.node_srv.settler_stop.set()
+        cls.node_srv.shutdown()
+        cls.node_srv.server_close()
+        wallets.WALLET_DIR = cls._wd
+        cls.tmp.cleanup()
+
+    def test_seller_offline_through_the_race_is_still_paid(self):
+        import channels
+        old_hold = server.REFUND_HOLD_S
+        server.REFUND_HOLD_S = 0  # no help from the node either
+        try:
+            c = Client(self.api, "offline-racer", node=self.node)
+            c.faucet()
+            bc = channels.BuyerChannel(30)
+            led = c._ledger()
+            tx = led.new_tx(c.wallet.address, self.paywall.wallet.address, 30, "channel:open")
+            expires = self.chain.height + channels.SellerBook.STOP_WITHIN + 3
+            tx.update(kind="channel_open", anchor=bc.anchor, ticks=30, unit=1, expires=expires)
+            wallets.sign_tx(tx, c.wallet, led)
+            c._submit(tx)
+            bc.id = tx["txid"]
+            served = sum(c._req("/forecast", headers={"X-Channel": bc.pay(3)})[0] == 200 for _ in range(4))
+            self.assertEqual(served, 4)
+            while self.chain.height < expires:
+                c._node(f"/faucet?address={'ee' * 32}")
+            led = c._ledger()
+            r = led.new_tx(c.wallet.address, c.wallet.address, 30, "channel:refund")
+            r.update(kind="channel_refund", channel=bc.id)
+            wallets.sign_tx(r, c.wallet, led)
+            self.assertEqual(c._node("/tx", r)[0], 200)  # the request: opens the window
+            claim = c._ledger().new_tx(c.wallet.address, c.wallet.address, 30, "channel:refund")
+            claim.update(kind="channel_refund", channel=bc.id)
+            wallets.sign_tx(claim, c.wallet, c._ledger())
+            code, body = c._node("/tx", claim)  # an immediate claim: refused, the window is open
+            self.assertEqual(code, 400, body)
+            self.assertIn("refund window open", body["error"])
+            self.assertEqual(self.chain.ledger.channels[bc.id]["open"], True)
+            self.paywall.node.forget(bc.id)
+            res = self.paywall.settle(bc.id)  # the seller comes back (minutes later would do too)
+            self.assertEqual(res["paid_to_seller"], 12)
+            self.assertEqual(self.chain.ledger.channels[bc.id]["paid"], 12)
+        finally:
+            server.REFUND_HOLD_S = old_hold
+
+
 if __name__ == "__main__":
     unittest.main()

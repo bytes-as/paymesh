@@ -72,9 +72,17 @@ class ChannelLedger(ChannelBase):
             self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))
         for _ in range(6):
             self.c.mine()
-        self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))
-        self.c.mine()
-        self.assertEqual(self.c.balance(self.buyer.address), 498)  # the open's and the refund's fees
+        old = ch.REFUND_WINDOW_S
+        ch.REFUND_WINDOW_S = 0  # the window itself is tested in test_expiry
+        try:
+            self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))  # 1: opens the window
+            self.c.mine()
+            self.assertEqual(self.c.balance(self.buyer.address), 398)  # deposit still held; request fee paid
+            self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))  # 2: the claim
+            self.c.mine()
+        finally:
+            ch.REFUND_WINDOW_S = old
+        self.assertEqual(self.c.balance(self.buyer.address), 497)  # fees: open, request, claim
 
     def test_open_needs_funds_and_exact_deposit(self):
         buyer = self.funded("poor", 10)

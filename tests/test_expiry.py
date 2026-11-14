@@ -2,11 +2,13 @@
 and the order of a close and a refund that meet in the same block."""
 import os
 import sys
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
+import chain as ch_mod  # noqa: E402
 import channels  # noqa: E402
 import paymesh_x402 as x402  # noqa: E402
 from test_attacks import Scratch  # noqa: E402
@@ -62,17 +64,47 @@ class Expiry(Scratch):
         self.c.mine()
         self.assertEqual(self.c.ledger.channels[self.bc.id]["paid"], 3)
 
-    def test_refund_first_then_the_close_is_refused(self):
-        self.open(5)
+    def to_expiry(self):
         while self.c.height < self.c.ledger.channels[self.bc.id]["expires"]:
             self.c.mine()
-        self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))  # nothing was paid: refund is right
-        self.book.book[self.bc.id] = {"i": 2, "w": self.bc.words[2]}  # a seller claiming a word after the fact
-        with self.assertRaises(ValueError):
-            self.c.add_tx(self.book.close_tx(self.c, self.seller, self.bc.id))
-        self.c.mine()
-        self.assertEqual(self.c.ledger.channels[self.bc.id]["paid"], 0)
 
+    def test_a_close_during_the_refund_window_wins(self):
+        """A buyer spends, then asks for a refund while the seller is offline. The seller comes
+        back within the window and closes with its best word: it is paid, the claim fails."""
+        self.open(channels.SellerBook.STOP_WITHIN + 3)
+        self.native(4)
+        self.to_expiry()
+        self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))  # opens the window
+        self.c.mine()
+        self.c.add_tx(self.book.close_tx(self.c, self.seller, self.bc.id))  # the seller, late but in time
+        self.c.mine()
+        ch_ = self.c.ledger.channels[self.bc.id]
+        self.assertEqual((ch_["open"], ch_["paid"]), (False, 4))
+        with self.assertRaises(ValueError):
+            self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))
+        self.assertTrue(ch_mod.Chain(self.c.path).valid()[0])
+
+    def test_the_claim_waits_for_the_window_then_pays(self):
+        old = ch_mod.REFUND_WINDOW_S
+        ch_mod.REFUND_WINDOW_S = 0.4
+        try:
+            self.open(5)
+            self.to_expiry()
+            before = self.c.balance(self.buyer.address)
+            self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))
+            self.c.mine()
+            with self.assertRaises(ValueError) as cm:  # claimed too early: the seller may still close
+                self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))
+            self.assertIn("refund window open", str(cm.exception))
+            time.sleep(0.5)
+            self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))
+            self.c.mine()
+            self.assertEqual(self.c.balance(self.buyer.address), before + 100 - 2)  # 2 fees
+            with self.assertRaises(ValueError):  # and the seller can't close afterwards
+                self.c.add_tx(self.book.close_tx(self.c, self.seller, self.bc.id))
+            self.assertTrue(ch_mod.Chain(self.c.path).valid()[0])
+        finally:
+            ch_mod.REFUND_WINDOW_S = old
 
 if __name__ == "__main__":
     unittest.main()

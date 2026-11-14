@@ -280,6 +280,28 @@ def run(node: str, restart=None) -> list:
                 lambda c, b: paid_calls == 3 and b.get("paid") == 13
                 and sorted(b.get("splits", {}).values()) == [3, 9])  # 10 - the close's fee
 
+        # the refund window: a seller that runs no settler at all (victim) keeps its money
+        off = chn.BuyerChannel(10)
+        me.faucet()
+        led = me._ledger()
+        t = led.new_tx(me.wallet.address, victim.wallet.address, 10, "channel:open")
+        t.update(kind="channel_open", anchor=off.anchor, ticks=10, unit=1, expires=height() + 2)
+        wallets.sign_tx(t, me.wallet, led)
+        post(t)
+        off.id = t["txid"]
+        while height() < t["expires"]:
+            me._node(f"/faucet?address={'ee' * 32}")
+
+        def refund_tx_for(c):
+            led = c._ledger()
+            r = led.new_tx(c.wallet.address, c.wallet.address, 10, "channel:refund")
+            r.update(kind="channel_refund", channel=off.id)
+            wallets.sign_tx(r, c.wallet, led)
+            return r
+        post(refund_tx_for(me))  # step 1: opens the window
+        attempt("claim a refund at once, while the seller is offline",
+                lambda: post(refund_tx_for(me)), lambda c, b: c == 400 and "refund window open" in str(b))
+
         # a seller (me) inflating its close with splits beyond what the buyer revealed
         bc2 = chn.BuyerChannel(20)
         led = victim._ledger()

@@ -30,7 +30,14 @@ DIFFICULTY = 2  # hash must start with this many zeros; tuned so block time < 1s
 CHAIN_FILE = os.path.join(wallets.HOME, "chain.json")
 FAUCET = "0" * 64  # only the faucet may send unsigned txs
 MAX_MEMO = 256
-MAX_SPLITS = 64  # payees in one channel_close (a hub paying the sellers a channel bought from)
+MAX_SPLITS = 64
+# refund window: from REFUND_EPOCH (block timestamps) a refund takes two channel_refund txs.
+# The first, from the expiry height on, opens a window of REFUND_WINDOW_S seconds; until the
+# buyer's second one (the claim, after the window) is mined, the seller can still close
+# with its best word, and a close cancels the refund. A seller whose settler is down or slow
+# keeps its money as long as it settles within the window: blocks are cheap, time is not.
+REFUND_EPOCH = 1794677340  # 2026-11-14 22:59 IST
+REFUND_WINDOW_S = 600  # payees in one channel_close (a hub paying the sellers a channel bought from)
 FAUCET_MAX = 100  # PMX per faucet mint
 CKPT_EVERY = 500  # blocks between ledger checkpoints (chain.json.ckpt)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -203,6 +210,12 @@ class Ledger:
                 raise ValueError("refund amount must equal the deposit")
             if fee > amt:
                 raise ValueError("the refund fee is more than the deposit")
+            if self.time >= REFUND_EPOCH:
+                at = ch.get("refund_at")
+                if at is None and self.balances.get(frm, 0) < fee:  # the request's fee: from the balance
+                    raise ValueError(f"insufficient funds for the refund request's {fee} PMX fee")
+                if at is not None and self.time < at:
+                    raise ValueError(f"refund window open: the seller may still close until {at:.0f}; claim after that")
             self._signed_by(tx, frm)
             return
         raise ValueError(f"unknown tx kind {kind!r}")
@@ -275,8 +288,12 @@ class Ledger:
                 ch["splits"] = dict(tx["splits"])
         elif kind == "channel_refund":
             ch = self.channels[tx["channel"]]
-            self.balances[frm] = self.balances.get(frm, 0) + amt - fee
-            ch.update(open=False, paid=0)
+            if self.time >= REFUND_EPOCH and ch.get("refund_at") is None:  # step 1: open the window
+                self.balances[frm] = self.balances.get(frm, 0) - fee
+                ch["refund_at"] = self.time + REFUND_WINDOW_S
+            else:  # step 2 (or a refund from before the epoch): the deposit comes back
+                self.balances[frm] = self.balances.get(frm, 0) + amt - fee
+                ch.update(open=False, paid=0)
         self.txids.add(tx["txid"])
 
 
