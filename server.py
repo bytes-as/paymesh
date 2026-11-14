@@ -40,7 +40,8 @@ BOOK: channels.SellerBook
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "paymesh/0.2"
+    server_version = "paymesh/0.3"
+    protocol_version = "HTTP/1.1"  # keep-alive: every response carries Content-Length
 
     def log_message(self, fmt, *args):
         print(f"[api] {self.address_string()} {fmt % args}")
@@ -151,6 +152,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 if not 0 < length <= MAX_TX_BYTES:
+                    self.close_connection = True  # the unread body must not become the next request
                     raise ValueError(f"body must be 1..{MAX_TX_BYTES} bytes")
                 tx = json.loads(self.rfile.read(length).decode())
                 with chain_lock:
@@ -168,6 +170,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 if not 0 < length <= 4096:
+                    self.close_connection = True
                     raise ValueError("body must be 1..4096 bytes")
                 cid = str(json.loads(self.rfile.read(length).decode()).get("channel", ""))
                 blk, tx = settle(cid)

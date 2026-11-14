@@ -11,12 +11,13 @@ and the price of each route is learned from its first 402. The channel's state
 (secret seed, ticks spent) is kept beside the wallet, so an agent can stop and
 resume. Stdlib only.
 """
+import http.client
 import json
 import math
 import os
+import socket
 import threading
-import urllib.error
-import urllib.request
+import urllib.parse
 
 import chain as ch
 import channels
@@ -30,6 +31,8 @@ class PaymentError(Exception):
 class Client:
     def __init__(self, api: str, wallet: str, timeout: float = 10.0):
         self.api = api.rstrip("/")
+        self.base_path = urllib.parse.urlsplit(self.api).path
+        self._tl = threading.local()
         self.wallet = wallets.load_or_create(wallet)
         self.timeout = timeout
         self.prices: dict = {}  # path -> PMX, learned from 402s
@@ -39,21 +42,48 @@ class Client:
         self._load_channel()
 
     # --- HTTP ---
+    def _conn(self):
+        """This thread's kept-alive connection. Connect blocking, then set the timeout:
+        on Windows a timed connect costs ~15 ms per request."""
+        c = getattr(self._tl, "conn", None)
+        if c is None:
+            u = urllib.parse.urlsplit(self.api)
+            c = http.client.HTTPConnection(u.hostname, u.port or 80)
+            c.sock = socket.create_connection((u.hostname, u.port or 80))
+            c.sock.settimeout(self.timeout)
+            c.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self._tl.conn, self._tl.fresh = c, True
+        return c
+
+    def _drop(self):
+        c = getattr(self._tl, "conn", None)
+        if c is not None:
+            c.close()
+        self._tl.conn = None
+
     def _req(self, path, data=None, headers=None):
         body = json.dumps(data).encode() if data is not None else None
         h = {"Content-Type": "application/json"} if body else {}
         h.update(headers or {})
-        req = urllib.request.Request(self.api + path, data=body, headers=h)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                return r.status, json.loads(r.read().decode() or "null")
-        except urllib.error.HTTPError as e:
-            with e:
-                raw = e.read().decode()
+        for _ in range(2):
+            c = self._conn()
+            reused, self._tl.fresh = not self._tl.fresh, False
             try:
-                return e.code, json.loads(raw)
-            except json.JSONDecodeError:
-                return e.code, {"error": raw}
+                c.request("POST" if body is not None else "GET", self.base_path + path, body=body, headers=h)
+                r = c.getresponse()
+                raw = r.read().decode()
+                if r.will_close:
+                    self._drop()
+                break
+            except (http.client.HTTPException, OSError):
+                self._drop()
+                if not reused:  # a fresh connection failed: the server is down
+                    raise
+                # the server closed an idle kept-alive connection: retry once on a new one
+        try:
+            return r.status, json.loads(raw or "null")
+        except json.JSONDecodeError:
+            return r.status, {"error": raw}
 
     def _ledger(self) -> "_Remote":
         """The server's view of this wallet: balance, current key, chain height."""
