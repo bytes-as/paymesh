@@ -29,6 +29,7 @@ DIFFICULTY = 2  # hash must start with this many zeros; tuned so block time < 1s
 CHAIN_FILE = os.path.join(wallets.HOME, "chain.json")
 FAUCET = "0" * 64  # only the faucet may send unsigned txs
 MAX_MEMO = 256
+FAUCET_MAX = 100  # PMX per faucet mint
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 FORMAT = 2  # chain.json format: {"format": 2, "blocks": [...]}
 
@@ -163,6 +164,8 @@ class Ledger:
         if frm == FAUCET:
             if not memo.startswith("faucet:"):
                 raise ValueError("faucet txs carry a faucet: memo")
+            if amt > FAUCET_MAX:
+                raise ValueError(f"a faucet mint is at most {FAUCET_MAX} PMX")
             return
         ok, why = wallets.verify_tx(tx, self.current_key(frm))
         if not ok:

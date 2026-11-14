@@ -155,6 +155,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.close_connection = True  # the unread body must not become the next request
                     raise ValueError(f"body must be 1..{MAX_TX_BYTES} bytes")
                 tx = json.loads(self.rfile.read(length).decode())
+                if isinstance(tx, dict) and tx.get("from_wallet") == chain.FAUCET:
+                    raise ValueError("faucet mints come from GET /faucet only")
                 with chain_lock:
                     chain_inst.add_tx(tx)  # raises on any broken ledger rule
                     blk = chain_inst.mine()

@@ -93,6 +93,15 @@ class EndToEnd(unittest.TestCase):
         code, _ = http(self.base + "/health")
         self.assertEqual(code, 200)  # still up
 
+    def test_3b_nobody_mints_through_post_tx(self):
+        me = "ab" * 32
+        for amount in (10**12, 100):
+            tx = ch.Chain.new_tx(ch.FAUCET, me, amount, "faucet:gift")
+            code, _ = http(self.base + "/tx", json.dumps(tx).encode(), {"Content-Type": "application/json"})
+            self.assertEqual(code, 400)
+        code, body = http(self.base + f"/account?address={me}")
+        self.assertEqual(json.loads(body)["balance"], 0)
+
     def test_4_explorer_escapes_hostile_memos(self):
         w = wallets.load_or_create("e2e-xss")
         buyer_agent.ensure_funded(self.chain, w, 10)

@@ -205,8 +205,10 @@ def forge_fields(ledger, address: str) -> dict:
 def fund(chain, name: str, amount: int) -> Wallet:
     """Mint to a wallet via an unsigned tx from the zero-address faucet (amount 0: just create)."""
     w = load_or_create(name)
-    if amount > 0:
-        chain.add_tx(chain.new_tx("0" * 64, w.address, amount, f"faucet:{name}"))
+    while amount > 0:  # the ledger caps one mint at 100 PMX
+        part = min(amount, 100)
+        chain.add_tx(chain.new_tx("0" * 64, w.address, part, f"faucet:{name}"))
+        amount -= part
     return w
 
 

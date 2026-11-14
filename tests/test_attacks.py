@@ -89,6 +89,10 @@ class LedgerAttacks(Scratch):
             self.c.add_tx(json.loads(json.dumps(tx)))
         self.assertEqual(self.c.balance(buyer.address), 95)
 
+    def test_a_block_cannot_mint_more_than_the_faucet_limit(self):
+        with self.assertRaises(ValueError):
+            self.c.add_tx(self.c.new_tx(ch.FAUCET, "ab" * 32, ch.FAUCET_MAX + 1, "faucet:big"))
+
     def test_tampered_chain_file_is_detected_on_load(self):
         buyer = self.funded("buyer", 100)
         seller = self.funded("seller", 0)
