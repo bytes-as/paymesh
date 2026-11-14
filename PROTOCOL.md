@@ -234,6 +234,9 @@ channel's 872–1,532 calls/s. At a seller running apart, each call adds one
 kept-alive round trip to the hub: p50 4.6 ms against 2.7 ms for a direct
 channel to that seller (155 against 319 calls/s; most of the base cost is
 `wsgiref`).
+`py -3 bench.py` now measures the node-side hub path (`hub_channel`): on 2026-11-15, with
+the CPU about 30 % busy, a median 1,288 calls/s (p50 0.66 ms) against 1,703 (0.55 ms) for a
+direct channel, 2,000 calls each, the hub's payouts running.
 
 ## 2. Other endpoints
 

@@ -158,6 +158,9 @@ Numbers move with the machine's load. On 2026-11-15, with the CPU about 30 % bus
 other programs, the same command gave a median of 172 / 1,713 / 1,802 calls per second
 over three runs, and the last pushed version (`cf0848d`), run alternately with it, gave
 162 / 1,575 / 1,628. The features added since then cost nothing measurable.
+In the same conditions a hub channel (one deposit that pays any seller, every word
+through the hub's book, payouts running) did a median 1,288 paid calls per second
+(p50 0.66 ms) against 1,703 (0.55 ms) for a direct channel; `bench.py` measures both.
 
 ## Guarantees, each covered by a test
 
