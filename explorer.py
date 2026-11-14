@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chain
 import wallets
 
-HOST, PORT = "127.0.0.1", 8403
+HOST, PORT = "127.0.0.1", int(os.environ.get("PAYMESH_EXPLORER_PORT", 8403))
 chain_inst: chain.Chain = None
 PRICES_MAP: dict = {}
 

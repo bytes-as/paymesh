@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chain
 import wallets
 
-API = "http://127.0.0.1:8402"
+API = os.environ.get("PAYMESH_API", f"http://127.0.0.1:{os.environ.get('PAYMESH_API_PORT', 8402)}")
 WAIT_FOR_MINE = 1.0  # give the server a beat after we mine (server mines on its thread)
 
 

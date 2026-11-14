@@ -23,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 PID_FILE = os.path.join(HERE, "paymesh.pid")
 LOG_FILE = os.path.join(HERE, "paymesh.log")
+API = f"http://127.0.0.1:{os.environ.get('PAYMESH_API_PORT', 8402)}"
 
 
 def serve_forever():
@@ -75,22 +76,22 @@ def stop():
 def status(quiet=False) -> bool:
     up = False
     try:
-        with urllib.request.urlopen("http://127.0.0.1:8402/health", timeout=2) as r:
+        with urllib.request.urlopen(f"{API}/health", timeout=2) as r:
             up = r.status == 200
             health = json.loads(r.read().decode())
     except Exception:
         health = {}
     if not quiet:
         print("up" if up else "down", json.dumps(health))
-        print("api:      http://127.0.0.1:8402  (prices: "
+        print(f"api:      {API}  (prices: "
               + "  ".join(f"{p}={v} PMX" for p, v in sorted(PRICES_DISPLAY())) + ")")
-        print("explorer: http://127.0.0.1:8403")
+        print(f"explorer: http://127.0.0.1:{os.environ.get('PAYMESH_EXPLORER_PORT', 8403)}")
     return up
 
 
 def PRICES_DISPLAY():
     try:
-        with urllib.request.urlopen("http://127.0.0.1:8402/open/info", timeout=2) as r:
+        with urllib.request.urlopen(f"{API}/open/info", timeout=2) as r:
             return json.loads(r.read().decode())["endpoints"].items()
     except Exception:
         return {}
