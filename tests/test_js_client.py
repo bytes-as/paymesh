@@ -12,9 +12,10 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, ROOT)
+sys.path[:0] = [ROOT, os.path.join(ROOT, "examples")]
 
 import chain as ch  # noqa: E402
+import channels  # noqa: E402
 import paymesh_x402 as x402  # noqa: E402
 import server  # noqa: E402
 import wallets  # noqa: E402
@@ -115,6 +116,12 @@ class Vectors(unittest.TestCase):
             bad["amount"] += 1
             self.assertFalse(wallets.verify_tx(bad, w.key_fp(i))[0])
 
+    def test_channel_words_match_python(self):
+        seed = bytes(range(100, 132))
+        py = channels.BuyerChannel(7, seed)
+        out = js("const c = new P.BuyerChannel(7, P.unhex(input)); return c.words;", seed.hex())
+        self.assertEqual(out, py.words)
+
     def test_python_wallet_file_and_x402_encoding(self):
         w = wallets.Wallet("vec", SEED, next_index=4)
         out = js("const w = P.Wallet.fromJSON(input.w); const e = P.encode(input.obj);"
@@ -139,13 +146,57 @@ class EndToEnd(unittest.TestCase):
         cls.port = free_port()
         cls.api = server.start(cls.chain, port=cls.port)
 
+        import threading
+        from wsgiref.simple_server import make_server
+        import weather_api
+        from test_seller import Quiet
+        cls.sport = free_port()
+        cls.paywall, app = weather_api.build(f"http://127.0.0.1:{cls.port}", wallet="js-weather")
+        cls.httpd = make_server("127.0.0.1", cls.sport, app, server_class=weather_api.ThreadingWSGIServer, handler_class=Quiet)
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
     @classmethod
     def tearDownClass(cls):
+        cls.paywall.close()
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
         cls.api.settler_stop.set()
         cls.api.shutdown()
         cls.api.server_close()
         wallets.WALLET_DIR = cls._wd
         cls.tmp.cleanup()
+
+    def funded(self):
+        seed = os.urandom(32)
+        addr = wallets.Wallet("jsbuyer", seed).address
+        import urllib.request
+        urllib.request.urlopen(f"http://127.0.0.1:{self.port}/faucet?address={addr}").read()
+        return seed, addr
+
+    def test_channels_open_inside_a_payment_then_pay_with_words(self):
+        seed, addr = self.funded()
+        out = js("const w = new P.Wallet(P.unhex(input.seed)); let saved;"
+                 "const opts = { channelTicks: 20 };"
+                 "const node = new P.Client(input.node, w, x => saved = JSON.stringify(x), opts);"
+                 "const shop = new P.Client(input.shop, w, x => saved = JSON.stringify(x), opts);"
+                 "const r = [];"
+                 "for (const [c, p] of [[node, '/premium/price'], [node, '/premium/price'], [node, '/premium/price'],"
+                 "                      [shop, '/forecast'], [shop, '/forecast']]) {"
+                 "  const x = await c.get(p); r.push([x.status, x.via, x.receipt && x.receipt.success]); }"
+                 "return { r, nextIndex: w.nextIndex, locked: w.locked, saved: JSON.parse(saved) };",
+                 {"seed": seed.hex(), "node": f"http://127.0.0.1:{self.port}", "shop": f"http://127.0.0.1:{self.sport}"})
+        self.assertEqual(out["r"], [[200, "channel-open", True], [200, "channel", True], [200, "channel", True],
+                                    [200, "channel-open", True], [200, "channel", True]])
+        self.assertEqual((out["nextIndex"], out["locked"]), (2, None))  # two opens: the only signatures
+        node_ch = out["saved"]["channels"][server.SELLER.address]
+        shop_ch = out["saved"]["channels"][self.paywall.wallet.address]
+        self.assertEqual((node_ch["spent"], shop_ch["spent"]), (15, 6))
+        for cid, seller, n in ((node_ch["id"], server.SELLER.address, 20), (shop_ch["id"], self.paywall.wallet.address, 20)):
+            c = self.chain.ledger.channels[cid]
+            self.assertEqual((c["buyer"], c["seller"], c["n"], c["open"]), (addr, seller, n, True))
+        self.assertEqual(server.BOOK.best(node_ch["id"])["i"], 15)
+        self.assertEqual(self.paywall.book.best(shop_ch["id"])["i"], 6)
+        self.assertEqual(self.chain.balance(addr), 100 - 2 * (20 + 1))  # two deposits and their fees, nothing else
 
     def test_the_js_client_pays_a_route_twice(self):
         seed = os.urandom(32)

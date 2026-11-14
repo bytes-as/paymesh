@@ -6,8 +6,14 @@
  * PAYMENT-RESPONSE. SHA-256 is pure JS, so it also runs on plain-http pages (no crypto.subtle).
  *
  *   const w = Paymesh.Wallet.create();          // or Paymesh.Wallet.fromJSON(saved)
- *   const api = new Paymesh.Client("http://127.0.0.1:8402", w);
- *   const r = await api.get("/premium/price");  // {status, body, receipt, paid}
+ *   const api = new Paymesh.Client("http://127.0.0.1:8402", w, save, { channelTicks: 100 });
+ *   const r = await api.get("/premium/price");  // {status, body, receipt, paid, via}
+ *
+ * Channels (the fast path): with channelTicks set, the first paid call to a seller opens a
+ * PayWord channel inside its payment (the signed channel_open travels in PAYMENT-SIGNATURE
+ * with the first word; the seller mines it), and later calls pay with the next word of the
+ * hash chain: a few hashes, no transaction, no new one-time key. Without it, every call pays
+ * with a signed tx. A page can't post to /tx itself, which is why the open rides along.
  *
  * Keys: a browser page can't read /account or post to /tx (paymesh refuses other sites there,
  * PROTOCOL 0c), so the wallet tracks its key index itself: 0 for a new wallet, +1 after each
@@ -188,6 +194,7 @@
       this.seed = seed;
       this.nextIndex = nextIndex;
       this.locked = locked; // index of a key a refused payment exposed
+      this.channels = {}; // seller address -> BuyerChannel
       this._cache = new Map();
       this.address = this.keyFingerprint(0);
     }
@@ -200,10 +207,13 @@
       }
       const w = new Wallet(unhex(o.seed), o.next_index || 0, o.locked ?? null);
       if (o.address && o.address !== w.address) throw new Error("the seed does not match the address");
+      for (const [seller, c] of Object.entries(o.channels || {})) w.channels[seller] = BuyerChannel.fromJSON(c);
       return w;
     }
     toJSON() {
-      return { seed: hex(this.seed), address: this.address, next_index: this.nextIndex, locked: this.locked };
+      const channels = {};
+      for (const [seller, c] of Object.entries(this.channels)) channels[seller] = c.toJSON();
+      return { seed: hex(this.seed), address: this.address, next_index: this.nextIndex, locked: this.locked, channels };
     }
     key(i) {
       if (!this._cache.has(i)) {
@@ -233,6 +243,29 @@
     return tx;
   }
 
+  // --- payment channels (channels.BuyerChannel): words[0] = anchor, words[i] pays tick i ---
+  class BuyerChannel {
+    constructor(n, seed) {
+      this.n = n;
+      this.seed = seed || randomBytes(32);
+      const words = [this.seed];
+      for (let k = 0; k < n; k++) words.push(sha256(words[words.length - 1]));
+      words.reverse();
+      this.words = words.map(hex);
+      this.anchor = this.words[0];
+      this.spent = 0;
+      this.id = null;
+      this.unit = 1;
+    }
+    static fromJSON(o) {
+      const c = new BuyerChannel(o.n, unhex(o.seed));
+      Object.assign(c, { spent: o.spent, id: o.id, unit: o.unit });
+      return c;
+    }
+    toJSON() { return { n: this.n, seed: hex(this.seed), spent: this.spent, id: this.id, unit: this.unit }; }
+    left() { return this.n - this.spent; }
+  }
+
   // --- x402 -------------------------------------------------------------------------------
   const encode = (obj) => btoa(pyJson(obj, true));
   function decode(v) {
@@ -244,12 +277,17 @@
 
   class PaymentError extends Error {}
 
+  const CHANNEL_EXPIRES = 10000; // blocks a channel opened here stays open (the Python client's default)
+  const DEAD = /settled|unknown channel|too close to settle|exhausted|pays someone else/;
+
   class Client {
-    /** api: the paid API's base URL. wallet: a Wallet. onSave(wallet): called after a key is used. */
-    constructor(api, wallet, onSave) {
+    /** api: the paid API's base URL. wallet: a Wallet. onSave(wallet): called when the wallet
+     * changes (keys, channels). opts.channelTicks: open channels of that many ticks (0: off). */
+    constructor(api, wallet, onSave, opts) {
       this.api = api.replace(/\/+$/, "");
       this.wallet = wallet;
       this.onSave = onSave || (() => {});
+      this.channelTicks = (opts && opts.channelTicks) || 0;
     }
     async _fetch(path, headers) {
       const r = await fetch(this.api + path, { headers: headers || {}, credentials: "omit" });
@@ -264,26 +302,82 @@
       if (r.status !== 402) return { status: r.status, body: r.body, receipt: decode(r.headers.get("PAYMENT-RESPONSE")), paid: false };
       const required = decode(r.headers.get("PAYMENT-REQUIRED"));
       if (!required) throw new PaymentError("402 without a readable PAYMENT-REQUIRED header (the server must expose it to this origin)");
-      const accepted = (required.accepts || []).find((a) => a.scheme === "paymesh" && a.extra && a.extra.assetTransferMethod === "tx");
+      const offer = (m) => (required.accepts || []).find((a) => a.scheme === "paymesh" && a.extra && a.extra.assetTransferMethod === m);
+      const chan = offer("channel");
+      if (chan && this.channelTicks > 0) {
+        const res = await this._viaChannel(path, chan);
+        if (res) return res;
+      }
+      const accepted = offer("tx");
       if (!accepted) throw new PaymentError("the 402 offers no paymesh tx payment");
+      return this._viaTx(path, accepted);
+    }
+    _key() {
       const w = this.wallet;
       if (w.locked !== null) {
         throw new PaymentError(`key ${w.locked} was seen in a refused payment and must not sign again: retire it from a script (py -3 wallet.py) or use a new wallet`);
       }
-      const i = w.nextIndex;
-      const tx = signTx(newTx(w.address, accepted.payTo, Number(accepted.amount), accepted.extra.memo), w, i);
-      r = await this._fetch(path, { "PAYMENT-SIGNATURE": encode({ x402Version: 2, accepted, payload: { transaction: tx } }) });
-      const receipt = decode(r.headers.get("PAYMENT-RESPONSE"));
+      return w.nextIndex;
+    }
+    _keyUsed(i, r, receipt) {
       if ((r.status === 200 && receipt && receipt.success) || (receipt && receipt.errorReason === "settlement_pending")) {
-        w.nextIndex = i + 1; // mined (or queued to be): the ledger now expects the next key
+        this.wallet.nextIndex = i + 1; // mined (or queued to be): the ledger now expects the next key
       } else {
-        w.locked = i;
+        this.wallet.locked = i;
+      }
+    }
+    async _pay(path, accepted, payload) {
+      const r = await this._fetch(path, { "PAYMENT-SIGNATURE": encode({ x402Version: 2, accepted, payload }) });
+      return [r, decode(r.headers.get("PAYMENT-RESPONSE"))];
+    }
+    /** Pay with the next word of this seller's channel; open one inside the payment if needed.
+     * Returns null when the channel can't be used (the caller pays with a tx instead). */
+    async _viaChannel(path, accepted) {
+      const w = this.wallet, seller = accepted.payTo, unit = Number(accepted.extra.unit || 1);
+      const ticks = Math.ceil(Number(accepted.amount) / unit);
+      let c = w.channels[seller];
+      if (c && c.id && c.unit === unit && c.left() >= ticks) {
+        c.spent += ticks;
+        const [r, receipt] = await this._pay(path, accepted, { channel: c.id, tick: c.spent, word: c.words[c.spent] });
+        if (r.status !== 200) {
+          c.spent -= ticks; // the word was not taken: it can pay again
+          const why = (receipt && (receipt.errorMessage || receipt.errorReason)) || "";
+          if (DEAD.test(why)) delete w.channels[seller];
+          this.onSave(w);
+          if (DEAD.test(why)) return null; // a new channel or a tx next
+        }
+        this.onSave(w);
+        return { status: r.status, body: r.body, receipt, paid: r.status === 200, via: "channel" };
+      }
+      if (accepted.extra.height === undefined) return null; // can't set an expiry: pay with a tx
+      const i = this._key();
+      c = new BuyerChannel(Math.max(this.channelTicks, ticks));
+      c.unit = unit;
+      const op = { from_wallet: w.address, to_wallet: seller, amount: c.n * unit, memo: "channel:open",
+        txid: sha256hex(utf8(`${w.address}${seller}${c.anchor}${Date.now()}${hex(randomBytes(8))}`)),
+        kind: "channel_open", anchor: c.anchor, ticks: c.n, unit, expires: accepted.extra.height + CHANNEL_EXPIRES };
+      signTx(op, w, i);
+      const [r, receipt] = await this._pay(path, accepted, { open: op, tick: ticks, word: c.words[ticks] });
+      this._keyUsed(i, r, receipt);
+      if (r.status === 200 || (receipt && receipt.errorReason === "settlement_pending")) {
+        c.id = op.txid;
+        c.spent = r.status === 200 ? ticks : 0;
+        w.channels[seller] = c;
       }
       this.onSave(w);
-      return { status: r.status, body: r.body, receipt, paid: r.status === 200, tx };
+      return { status: r.status, body: r.body, receipt, paid: r.status === 200, via: "channel-open", tx: op };
+    }
+    async _viaTx(path, accepted) {
+      const w = this.wallet;
+      const i = this._key();
+      const tx = signTx(newTx(w.address, accepted.payTo, Number(accepted.amount), accepted.extra.memo), w, i);
+      const [r, receipt] = await this._pay(path, accepted, { transaction: tx });
+      this._keyUsed(i, r, receipt);
+      this.onSave(w);
+      return { status: r.status, body: r.body, receipt, paid: r.status === 200, via: "tx", tx };
     }
   }
 
   return { sha256, sha256hex, hex, unhex, utf8, pyJson, deriveWots2, wots2Fingerprint, wotsDigits, msgDigest,
-    setFee, txSize, newTx, signTx, encode, decode, Wallet, Client, PaymentError, WOTS_L, VERSION: 2 };
+    setFee, txSize, newTx, signTx, encode, decode, Wallet, BuyerChannel, Client, PaymentError, WOTS_L, VERSION: 2 };
 });
