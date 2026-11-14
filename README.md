@@ -1,18 +1,68 @@
 # paymesh
 
-**x402 v2** pay-per-call micropayments for HTTP APIs, settled on a local Python
-mini-blockchain. A paid route answers `402 Payment Required` with a
-`PAYMENT-REQUIRED` header; an agent pays in `PAYMENT-SIGNATURE` and gets a
-`PAYMENT-RESPONSE` receipt, with no accounts and no payment processor. paymesh
-is an x402 scheme (`paymesh`) with two ways to pay:
+**Pay-per-call for APIs, built for AI agents.** An agent calls a paid endpoint, gets
+`402 Payment Required`, pays inside its next request and gets the answer, in milliseconds.
+No accounts, no cards, no API keys, no subscriptions. It speaks [x402 v2](https://github.com/x402-foundation/x402),
+the open standard for HTTP payments, and is checked against its reference SDK.
 
-* **on-chain**: one signed tx per call, sent in the header and settled by the seller;
-* **payment channel**: one deposit on-chain, then every call carries the next
-  word of a hash chain, checked with a few hashes (0.4 ms), settled in one block.
+## Why
 
-Python 3 stdlib only. CI (`.github/workflows/check.yml`) is set up to run `check.py` on Ubuntu
-and Windows with Python 3.10 and 3.13 on every push; it has not run yet. Protocol details: [PROTOCOL.md](PROTOCOL.md). Checked against the
-reference x402 Python SDK: `interop/x402_reference.py`.
+Agents buy data and compute one call at a time, from sellers they have never met. Accounts
+and monthly plans don't fit that, and a blockchain transaction per call is too slow and too
+expensive for a fraction of a cent. paymesh gives each call a payment that costs about as
+much as the call itself:
+
+```mermaid
+flowchart LR
+  A[Agent or web page] -- "GET /price" --> S[Paid API]
+  S -- "402 + PAYMENT-REQUIRED" --> A
+  A -- "same GET + PAYMENT-SIGNATURE" --> S
+  S -- "200 + PAYMENT-RESPONSE receipt" --> A
+  A -. "one deposit, then one hash per call" .-> H[Hub]
+  H -. "pays every seller on schedule" .-> S2[Any seller]
+```
+
+* **On-chain**: one signed transaction per call, sent in the header, settled by the seller.
+* **Payment channel**: one deposit, then every call carries the next word of a hash chain.
+  The seller checks it with a few hashes; nothing touches the chain until the channel closes.
+* **Hub**: one deposit pays *any* seller on the network. The hub pays each seller on a
+  schedule while the channel stays open.
+
+It works from Python (`paymesh_client.py`), from a browser page (`js/paymesh.js`, no
+dependencies), for any WSGI API (`paymesh_seller.py`), and as an x402 facilitator for
+servers that run no paymesh code at all.
+
+## In three numbers
+
+* **Under a millisecond** per paid call through a channel (median 0.4–0.7 ms, 1,300–2,500
+  calls/s from one client on one machine); 3–7 ms paying on-chain ([BENCHMARKS.md](BENCHMARKS.md)).
+* **5 bytes** of chain per channel call, against about 5,300 bytes per on-chain call.
+* **52 of 52 attacks refused**: forged signatures, double payments, replays, refund races,
+  cross-site minting. 137 tests, among them a node killed in the middle of a payout and a fuzz
+  test of thousands of random steps with crashes ([SECURITY.md](SECURITY.md)).
+
+## Why its own chain?
+
+paymesh settles on a small local chain (Python stdlib only, one node), so every rule can be
+attacked, crashed and fuzzed in one process and anyone can run the whole thing in five
+minutes. It also signs with hash-based one-time keys (WOTS, the
+building block of SPHINCS+), a kind of signature believed to resist quantum computers; this
+implementation has not been audited. The parts that matter for agents don't depend on that chain: the
+x402 scheme, payment channels, the hub with its payouts, the facilitator and the clients. The
+next step is to settle channel opens, payouts and closes on a public chain (an EVM contract
+holding USDC) and keep everything else as it is. What it is not: there is no consensus. The
+single node mines alone, "mining" is light block hashing, and PMX is play money from a faucet.
+
+| who | trusts | protected by |
+|---|---|---|
+| buyer | nothing it hasn't signed | a seller can only claim words the buyer revealed; unspent deposit comes back |
+| seller, direct channel | no one | it closes with its best word whenever it likes, even during a buyer's 10-minute refund window |
+| seller, via the hub | the hub, between payouts | payouts every 60 s or 50 PMX owed; each one recorded on chain, never paid twice |
+| everyone | the single node (miner, faucet, hub) | open code, a chain anyone can replay and check (`chain.json`) |
+
+Protocol details: [PROTOCOL.md](PROTOCOL.md). Interop with the reference x402 SDK:
+`interop/x402_reference.py`. CI (`.github/workflows/check.yml`) runs `check.py` on Ubuntu and
+Windows with Python 3.10 and 3.13.
 
 ## Quickstart (5 minutes)
 
@@ -137,101 +187,13 @@ settles channels itself. A buyer points the client at both:
 `Client("http://127.0.0.1:8404", wallet="me", node="http://127.0.0.1:8402")`.
 Runnable example: `py -3 examples/weather_api.py`.
 
-## Numbers
+## Tested
 
-`py -3 bench.py 100 2000`, on a separate server (never the live one), this machine
-(20 logical CPUs, Windows, Python 3.14) while otherwise idle, 2026-11-14:
-
-| | on-chain | channel | 8 agents, channels |
-|---|---|---|---|
-| paid calls per second | 296 | 2,495 | 3,511 (0 errors) |
-| latency p50 / p95 | 3.3 / 3.9 ms | 0.38 / 0.48 ms | |
-| chain bytes per call | 5,238 | 5 | |
-| fee per call | 1 PMX (burned) | 2 PMX per channel, any number of calls | |
-
-With 8 separate client processes paying on-chain the server mines 651 paid
-calls per second (pending txs share blocks). The cost of a paid tx doesn't
-grow with the chain (blocks are appended), and a restart at 10,000 blocks
-takes 0.38 s (ledger checkpoints; a full check runs in the background).
-
-Numbers move with the machine's load. On 2026-11-15, with the CPU about 30 % busy with
-other programs, the same command gave a median of 172 / 1,713 / 1,802 calls per second
-over three runs, and the last pushed version (`cf0848d`), run alternately with it, gave
-162 / 1,575 / 1,628. The features added since then cost nothing measurable.
-In the same conditions a hub channel (one deposit that pays any seller, every word
-through the hub's book, payouts running) did a median 1,288 paid calls per second
-(p50 0.66 ms) against 1,703 (0.55 ms) for a direct channel; `bench.py` measures both.
-
-## Guarantees, each covered by a test
-
-`py -3 -m unittest discover -s tests` (136 tests: attacks, channels, HTTP end
-to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
-`py -3 attacks.py` runs 50 attacks against a scratch node and shows each refused.
-`py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about two
-minutes, most of it the crash, fuzz and launcher tests.
-
-* **Keys are one-time and rotate every tx.** A signature can't be reused or
-  extended into a forgery; a spent key never verifies again. New keys are
-  WOTS v2: every hash-chain step is a different hash (per-key public seed,
-  chain and step number), so values published by one key are useless under
-  another, and old wallets move to v2 at their next signature.
-* **No overspending, negative or zero amounts, or minting.** Pending txs count
-  against the balance; only `GET /faucet` mints, at most 100 PMX.
-* **A signed tx counts once.** Resubmitting it is refused.
-* **A payment pays once.** Replayed `PAYMENT-SIGNATURE` / `X-Payment` headers and spent channel words
-  are refused, also after a server restart. A wrong payment can't burn someone
-  else's challenge. A signed tx in `PAYMENT-SIGNATURE` is put on chain only if it
-  pays an open challenge for that route exactly, so a refused one costs nothing.
-* **A seller never holds two signatures from one key.** After a seller refuses
-  a signed tx, the client retires that key (a self-payment via the node) before
-  signing again; the kept tx can no longer be mined. (With a balance of 0 it
-  can't, and says so: fund the wallet before paying again.)
-* **Chain growth costs.** Every signed tx burns at least 1 PMX per started
-  8 KB, the signature covers the fee, and the sender must hold amount + fee;
-  PMX is conserved (minted = held + locked + burned).
-* **One hub deposit pays many sellers, each word once.** The hub keeps one
-  counter per channel: a word spent at one seller is refused at every other,
-  and its payouts and its close pay each seller exactly what it was credited
-  (the ledger checks the splits add up to what the buyer revealed).
-* **Channel money is safe.** The seller can only claim ticks the buyer
-  revealed; signed channel terms can't be altered; an unsettled channel
-  refunds to the buyer after expiry, and the server settles paid channels
-  before that. No ticks are taken within 20 blocks of expiry, and a buyer who
-  spends a channel then races to refund it loses: a refund opens a 10-minute
-  window (by block time, not blocks, which are cheap) in which the seller can
-  still close with its best word, so it is paid even if its settler was down
-  during the race; the node also settles its own channels first.
-* **The chain file is checked on load.** Every block is replayed through the
-  same rules, so an edited history is refused.
-* **A crash loses nothing that was answered.** A block is on disk (fsync)
-  before its tx is answered "mined"; a channel tick is written before the call
-  is served, and fsynced within 50 ms (`PAYMESH_FSYNC=strict`: before). A
-  record cut off mid-write is cut away on the next start, never read as data;
-  a test cuts files at every point of their last record and kills a writer
-  process 12 times mid-run, and an attack kills the node and replays a word.
-* **The HTTP surface holds.** Wallet names can't escape `wallets/`, bodies
-  are size-capped, bad input gets `400` (never a crash: 1,000 fuzzed txs and
-  315 fuzzed payment headers per run), a tx can't carry fields beyond its
-  kind's, clients over their rate limit get `429`, and the explorer escapes
-  everything it shows.
-* **Browsers can pay, and only pay.** Paid routes answer any origin with the x402
-  headers exposed; every other route refuses a request a browser marks as cross-site,
-  so a page can't mint, post txs, open channels through `/tx` or read accounts
-  (`tests/test_cors.py`, 4 attacks). `js/paymesh.js` signs byte for byte as Python
-  does (`tests/test_js_client.py` compares them under Node.js).
-* **A facilitator settles a payment once.** `/settle` answers `success` for a
-  payment once; the settled mark is on disk before the answer, so a restart
-  doesn't forget it.
-* **Checkpoints can't hide anything.** A checkpoint that doesn't match the
-  chain is ignored; one edited to lie is caught by the background full check,
-  and the node then refuses txs (`/health` answers 503).
-* **Hub sellers are paid on schedule, once.** A hub channel's sellers get
-  `channel_payout`s while the channel stays open (every 60 s, or at 50 PMX owed;
-  `PAYMESH_HUB_PAYOUT_S` / `_MIN`). The chain records what was paid, so no tick
-  is paid twice and close and refund move only the rest. Killing the node before,
-  during or after a payout loses nothing and pays nothing twice
-  (`tests/test_payout.py`, `tests/test_payout_crash.py`; `tests/test_fuzz_payout.py`
-  checks conservation after every step of random runs with crashes).
+`py -3 check.py` runs everything in about two minutes: self-tests, 137 unit and end-to-end
+tests (crash recovery, fuzzing, browser signing against Python, the quickstart itself), the 52
+attacks (`py -3 attacks.py` shows each one refused) and a short benchmark. What each guarantee
+means and which test or attack covers it: [SECURITY.md](SECURITY.md). Measurements:
+[BENCHMARKS.md](BENCHMARKS.md).
 
 ## Limits (it's a proof of concept)
 
@@ -267,6 +229,7 @@ minutes, most of it the crash, fuzz and launcher tests.
 | `durable.py` | append-only logs, atomic replaces, fsync policy (`PAYMESH_FSYNC`), torn-tail repair |
 | `js/paymesh.js`, `js/demo.html` | browser/Node.js client: WOTS v2 signing in JS, x402 payments; a demo page |
 | `httppool.py` | kept-alive HTTP connections shared by threads (client SDK, seller middleware) |
+| `SECURITY.md`, `BENCHMARKS.md` | what is guaranteed and how it is tested; measurements |
 | `facilitator.py` | x402 facilitator: `/verify`, `/settle`, `/supported` for the `paymesh` scheme |
 | `paymesh_x402.py` | x402 v2 wire format: `PAYMENT-REQUIRED` / `-SIGNATURE` / `-RESPONSE` for the `paymesh` scheme |
 | `paywall.py` | 402 challenges and on-chain payment checks |
