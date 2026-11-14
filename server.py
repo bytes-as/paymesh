@@ -32,6 +32,10 @@ MAX_TX_BYTES = 200_000  # a signed tx is ~50 KB (Lamport pub + sig)
 CHANNEL_UNIT = 1  # PMX per channel tick
 SETTLE_WITHIN = 20  # settle a paid channel when it expires within this many blocks
 MINE_WAIT_S = float(os.environ.get("PAYMESH_MINE_WAIT_S", 15))  # how long POST /tx waits for its block
+# hub payouts: pay sellers what buyers revealed on hub channels without waiting for the close,
+# every HUB_PAYOUT_S seconds, or as soon as HUB_PAYOUT_MIN PMX are owed on a channel
+HUB_PAYOUT_S = float(os.environ.get("PAYMESH_HUB_PAYOUT_S", 60))
+HUB_PAYOUT_MIN = int(os.environ.get("PAYMESH_HUB_PAYOUT_MIN", 50))
 REFUND_HOLD_S = float(os.environ.get("PAYMESH_REFUND_HOLD_S", 6.0))  # > 2 polls of a separate seller's settler
 
 # simulated feed: some seeded history so /premium/history returns real data
@@ -532,6 +536,49 @@ def settle(cid: str):
     return blk, tx
 
 
+def _crash_point(name: str):
+    """Fault injection for the crash tests: PAYMESH_CRASH_AT=<name> kills the node the first
+    time it reaches <name> (a marker file next to the chain makes it once per data folder)."""
+    if os.environ.get("PAYMESH_CRASH_AT") != name:
+        return
+    marker = os.path.join(os.path.dirname(os.path.abspath(chain_inst.path)), f"crashed-at-{name}")
+    if not os.path.exists(marker):
+        open(marker, "w").close()
+        os._exit(70)  # no cleanup, like a power cut of the process
+
+
+def payout(cid: str):
+    """Pay a hub channel's sellers what was revealed since the last payout (channel stays open)."""
+    with chain_lock:
+        tx = HUB.payout_tx(chain_inst, HUB_WALLET, cid)
+        _crash_point("payout_signed")
+        chain_inst.add_tx(tx)
+        _crash_point("payout_pending")
+        blk = chain_inst.mine()
+        _crash_point("payout_mined")
+    with mined:
+        mined.notify_all()
+    print(f"[api] hub payout on {cid[:12]}: {tx['amount']} PMX to {len(tx['splits'])} seller(s) in block {blk.index}")
+    return blk, tx
+
+
+_owed_since: dict = {}  # hub channel -> when its oldest unpaid tick was first seen
+
+
+def _payouts_due(now: float) -> list:
+    owed = HUB.unpaid(chain_inst)
+    for cid in list(_owed_since):
+        if cid not in owed:
+            del _owed_since[cid]
+    due = []
+    expiring = set(HUB.expiring(chain_inst, SETTLE_WITHIN))  # those get closed instead
+    for cid, amount in owed.items():
+        since = _owed_since.setdefault(cid, now)
+        if cid not in expiring and (amount >= HUB_PAYOUT_MIN or (now - since >= HUB_PAYOUT_S and amount >= 2)):
+            due.append(cid)
+    return due
+
+
 def _miner(stop: threading.Event):
     """Mine whatever is pending. While one block is mined, new txs queue for the next,
     so under load many txs share a block instead of each paying for its own."""
@@ -548,13 +595,20 @@ def _miner(stop: threading.Event):
 
 
 def _settler(stop: threading.Event):
-    """Settle paid channels before they expire, so the buyer can't refund what it spent."""
-    while not stop.wait(2.0):
+    """Settle paid channels before they expire, so the buyer can't refund what it spent, and
+    pay hub sellers on schedule (HUB_PAYOUT_S / HUB_PAYOUT_MIN)."""
+    while not stop.wait(min(2.0, max(0.2, HUB_PAYOUT_S / 4))):
         for cid in BOOK.expiring(chain_inst, SETTLE_WITHIN) + HUB.expiring(chain_inst, SETTLE_WITHIN):
             try:
                 settle(cid)
             except ValueError as e:
                 print(f"[api] settle {cid[:12]} failed: {e}")
+        for cid in _payouts_due(time.time()):
+            try:
+                payout(cid)
+                _owed_since.pop(cid, None)
+            except ValueError as e:
+                print(f"[api] payout {cid[:12]} failed: {e}")
 
 
 def start(chain_: chain.Chain, port=PORT) -> http.server.ThreadingHTTPServer:

@@ -48,6 +48,7 @@ _SIGNED = _BASE | {"next_key", "sig", "pub", "kind", "fee"}
 FIELDS = {"faucet": _BASE | {"kind"}, "pay": _SIGNED,
           "channel_open": _SIGNED | {"anchor", "ticks", "unit", "expires"},
           "channel_close": _SIGNED | {"channel", "ticks", "word", "splits"},
+          "channel_payout": _SIGNED | {"channel", "ticks", "word", "splits", "shares"},
           "channel_refund": _SIGNED | {"channel"}}
 FORMAT = 3  # chain.json: a {"format": 3} line, then one block per line (append-only)
 
@@ -119,6 +120,12 @@ class Ledger:
     sha256^i(w_i) == anchor): i*unit to the seller, the rest back to the buyer.
     If the seller never closes, the buyer takes the deposit back with
     channel_refund once the channel's expiry height has passed.
+
+    Payouts: before closing, the seller may pay out what was revealed so far with
+    channel_payout (ticks i above the last paid tick, its word, `splits` to payees and the
+    gross `shares` they settle); the channel stays open. The chain keeps paid_ticks,
+    paid_word and paid_shares, so no tick is paid twice: a later payout or close must
+    reveal further along the chain, and close and refund move only what is left.
     """
 
     def __init__(self):
@@ -176,29 +183,43 @@ class Ledger:
             raise ValueError("unknown channel")
         if not ch["open"]:
             raise ValueError("channel already settled")
-        if kind == "channel_close":
+        if kind in ("channel_close", "channel_payout"):
             i, w = tx.get("ticks"), tx.get("word")
-            if frm != ch["seller"] or to != ch["buyer"]:
+            if kind == "channel_close" and (frm != ch["seller"] or to != ch["buyer"]):
                 raise ValueError("channel_close goes from the seller to the buyer")
-            if type(i) is not int or not 1 <= i <= ch["n"] or not isinstance(w, str) or not HEX64.match(w):
-                raise ValueError("channel_close needs ticks in 1..n and a 64-hex word")
-            if hash_word(w, i) != ch["anchor"]:
+            if kind == "channel_payout" and (frm != ch["seller"] or to != frm):
+                raise ValueError("channel_payout goes from the seller to itself (payees in splits)")
+            paid_i = ch.get("paid_ticks", 0)
+            lo = paid_i + 1 if kind == "channel_payout" else max(1, paid_i)
+            if type(i) is not int or not lo <= i <= ch["n"] or not isinstance(w, str) or not HEX64.match(w):
+                raise ValueError(f"{kind} needs ticks in {lo}..{ch['n']} (past the {paid_i} paid out) and a 64-hex word")
+            if hash_word(w, i - paid_i) != ch.get("paid_word", ch["anchor"]):
                 raise ValueError("word does not hash to the channel anchor in that many ticks")
-            if amt != i * ch["unit"]:
-                raise ValueError("channel_close amount must equal ticks * unit")
-            if fee > amt:
-                raise ValueError(f"the settlement fee ({fee} PMX) is more than the {amt} PMX it settles")
+            new = (i - paid_i) * ch["unit"]  # what this tx settles: ticks not paid out before
+            want = new if kind == "channel_payout" else i * ch["unit"]
+            if amt != want:
+                raise ValueError(f"{kind} amount must be {want} PMX "
+                                 + ("(the newly paid ticks * unit)" if kind == "channel_payout" else "(ticks * unit)"))
+            if new == 0:  # a close after payouts with nothing new: the fee comes out of the buyer's rest
+                if "splits" in tx:
+                    raise ValueError("nothing new to split: every tick was paid out already")
+                if ch["n"] * ch["unit"] - amt < fee:
+                    raise ValueError("the settlement fee is more than what goes back to the buyer")
+            elif fee > new:
+                raise ValueError(f"the settlement fee ({fee} PMX) is more than the {new} PMX it settles")
+            if kind == "channel_payout" and "splits" not in tx:
+                raise ValueError("channel_payout needs splits")
             if "splits" in tx:
-                sp = tx["splits"]
-                if not isinstance(sp, dict) or not 1 <= len(sp) <= MAX_SPLITS:
-                    raise ValueError(f"splits must map 1..{MAX_SPLITS} payees to amounts")
-                for who, part in sp.items():
-                    if not isinstance(who, str) or not HEX64.match(who) or who == FAUCET:
-                        raise ValueError("a split payee must be a 64-hex address")
-                    if type(part) is not int or part <= 0:
-                        raise ValueError("a split must be a whole number of PMX above 0")
-                if sum(sp.values()) != amt - fee:
-                    raise ValueError("splits must add up to the amount minus the fee")
+                self._check_payees(tx["splits"], "split")
+                if sum(tx["splits"].values()) != new - fee:
+                    raise ValueError("splits must add up to the newly settled amount minus the fee")
+            if kind == "channel_payout":
+                sh = tx.get("shares")
+                self._check_payees(sh, "share")
+                if sum(sh.values()) != new:
+                    raise ValueError("shares must add up to the amount paid out")
+                if any(who not in sh or part > sh[who] for who, part in tx["splits"].items()):
+                    raise ValueError("a payee's split is more than its share")
             self._signed_by(tx, frm)
             return
         if kind == "channel_refund":
@@ -206,8 +227,8 @@ class Ledger:
                 raise ValueError("only the buyer refunds a channel, to itself")
             if self.height < ch["expires"]:
                 raise ValueError(f"channel refundable from block {ch['expires']}")
-            if amt != ch["n"] * ch["unit"]:
-                raise ValueError("refund amount must equal the deposit")
+            if amt != (ch["n"] - ch.get("paid_ticks", 0)) * ch["unit"]:
+                raise ValueError("refund amount must equal the deposit minus what was paid out")
             if fee > amt:
                 raise ValueError("the refund fee is more than the deposit")
             if self.time >= REFUND_EPOCH:
@@ -219,6 +240,16 @@ class Ledger:
             self._signed_by(tx, frm)
             return
         raise ValueError(f"unknown tx kind {kind!r}")
+
+    @staticmethod
+    def _check_payees(m, what):
+        if not isinstance(m, dict) or not 1 <= len(m) <= MAX_SPLITS:
+            raise ValueError(f"{what}s must map 1..{MAX_SPLITS} payees to amounts")
+        for who, part in m.items():
+            if not isinstance(who, str) or not HEX64.match(who) or who == FAUCET:
+                raise ValueError(f"a {what} payee must be a 64-hex address")
+            if type(part) is not int or part <= 0:
+                raise ValueError(f"a {what} must be a whole number of PMX above 0")
 
     def check(self, tx) -> None:
         """Raise ValueError if tx breaks a rule; change nothing."""
@@ -280,12 +311,26 @@ class Ledger:
         elif kind == "channel_close":
             ch = self.channels[tx["channel"]]
             deposit = ch["n"] * ch["unit"]
-            for who, part in (tx.get("splits") or {ch["seller"]: amt - fee}).items():
-                self.balances[who] = self.balances.get(who, 0) + part  # a hub pays its sellers here
-            self.balances[ch["buyer"]] = self.balances.get(ch["buyer"], 0) + deposit - amt
+            new = amt - ch.get("paid_ticks", 0) * ch["unit"]
+            if new:
+                for who, part in (tx.get("splits") or {ch["seller"]: new - fee}).items():
+                    self.balances[who] = self.balances.get(who, 0) + part  # a hub pays its sellers here
+                self.balances[ch["buyer"]] = self.balances.get(ch["buyer"], 0) + deposit - amt
+            else:  # everything was paid out before: the buyer's rest pays the fee
+                self.balances[ch["buyer"]] = self.balances.get(ch["buyer"], 0) + deposit - amt - fee
             ch.update(open=False, paid=amt)
             if "splits" in tx:
                 ch["splits"] = dict(tx["splits"])
+        elif kind == "channel_payout":  # pay what was revealed so far; the channel stays open
+            ch = self.channels[tx["channel"]]
+            for who, part in tx["splits"].items():
+                self.balances[who] = self.balances.get(who, 0) + part
+            shares = ch.setdefault("paid_shares", {})
+            for who, part in tx["shares"].items():
+                shares[who] = shares.get(who, 0) + part
+            ch.update(paid_ticks=tx["ticks"], paid_word=tx["word"], paid=tx["ticks"] * ch["unit"])
+            if tx["ticks"] == ch["n"]:
+                ch["open"] = False  # the whole deposit is paid out
         elif kind == "channel_refund":
             ch = self.channels[tx["channel"]]
             if self.time >= REFUND_EPOCH and ch.get("refund_at") is None:  # step 1: open the window

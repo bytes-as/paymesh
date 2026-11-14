@@ -96,12 +96,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 height = chain_inst.height
             nm = lambda a: names.get(a, a[:10] + "..")  # noqa: E731
             channels_view = [{"id": c["id"], "buyer_name": nm(c["buyer"]), "seller_name": nm(c["seller"]),
-                              "deposit": c["n"] * c["unit"], "paid": c.get("paid", "-") if not c["open"] else "-",
+                              "deposit": c["n"] * c["unit"], "paid": c.get("paid", "-") if (not c["open"] or c.get("paid_ticks")) else "-",  # payouts: paid so far
                               "expires": c["expires"], "open": c["open"]} for c in reversed(chans[-50:])]
             stats = [("blocks", height), ("transactions", n_txs),
                      ("open channels", sum(c["open"] for c in chans)),
-                     ("PMX locked in channels", sum(c["n"] * c["unit"] for c in chans if c["open"])),
-                     ("PMX settled via channels", sum(c.get("paid", 0) for c in chans if not c["open"]))]
+                     ("PMX locked in channels", sum((c["n"] - c.get("paid_ticks", 0)) * c["unit"] for c in chans if c["open"])),
+                     ("PMX settled via channels", sum(c.get("paid", 0) for c in chans if not c["open"] or c.get("paid_ticks")))]
             data = {"blocks": [dict(b, txs=[_slim(t) for t in b["txs"]]) for b in blocks],
                     "txs": txs, "stats": stats, "channels": channels_view,
                     "balances": chain_inst.balances(),

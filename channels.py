@@ -180,36 +180,94 @@ class SellerBook:
         with self.lock:
             return self.book.get(cid)
 
+    def _snapshot(self, cid: str):
+        with self.lock:
+            b = self.book.get(cid)
+            return (dict(b) if b else None), dict(self.credits.get(cid) or {})
+
+    @staticmethod
+    def _unpaid(cr: dict, c: dict) -> dict:
+        """Hub credits on a channel not yet paid out (gross, per payee), from the chain's paid_shares."""
+        done = c.get("paid_shares") or {}
+        left = {who: amt - done.get(who, 0) for who, amt in cr.items()}
+        if any(v < 0 for v in left.values()) or set(done) - set(cr):
+            raise ValueError("the chain paid out more than this hub's credits: refusing to pay again")
+        return {who: v for who, v in left.items() if v > 0}
+
+    @staticmethod
+    def _net(shares: dict, fee: int) -> dict:
+        """Take the fee out of the shares, largest first (a deterministic rule)."""
+        out, left = dict(shares), fee
+        for who in sorted(out, key=lambda k: (-out[k], k)):
+            take = min(out[who], left)
+            out[who] -= take
+            left -= take
+        return {k: v for k, v in out.items() if v > 0}
+
     def close_tx(self, chain_, seller_wallet, cid: str) -> dict:
         """A signed channel_close claiming the best word seen; in hub mode it pays every
-        seller its share (splits)."""
+        seller its share (splits) of what was not paid out yet."""
         c = chain_.ledger.channels.get(cid)
-        b = self.best(cid)
+        b, cr = self._snapshot(cid)
         if c is None or not c["open"]:
             raise ValueError("no open channel with that id")
         if not b:
             raise ValueError("nothing paid on this channel yet; the buyer can refund it after expiry")
         tx = chain_.new_tx(self.seller, c["buyer"], b["i"] * c["unit"], "channel:close")
         tx.update(kind="channel_close", channel=cid, ticks=b["i"], word=b["w"])
-        with self.lock:
-            cr = dict(self.credits.get(cid) or {})
-        if cr:
-            if sum(cr.values()) != tx["amount"]:
-                raise ValueError(f"hub credits {sum(cr.values())} PMX differ from the {tx['amount']} PMX revealed")
-            # the fee comes out of the shares, largest first. Sized on the gross splits: the
-            # net ones are never longer, so the fee stays enough
-            tx["splits"] = cr
-            kind = seller_wallet.kind(seller_wallet.index_of(chain_.current_key(seller_wallet.address)))
-            left = wallets.set_fee(tx, kind)
-            if left > tx["amount"]:
-                raise ValueError(f"the settlement fee ({left} PMX) is more than the {tx['amount']} PMX revealed")
-            for who in sorted(cr, key=lambda k: (-cr[k], k)):
-                take = min(cr[who], left)
-                cr[who] -= take
-                left -= take
-            tx["splits"] = {k: v for k, v in cr.items() if v > 0}
+        new = (b["i"] - c.get("paid_ticks", 0)) * c["unit"]
+        kind = seller_wallet.kind(seller_wallet.index_of(chain_.current_key(seller_wallet.address)))
+        if cr and new:
+            shares = self._unpaid(cr, c)
+            if sum(shares.values()) != new:
+                raise ValueError(f"unpaid hub credits {sum(shares.values())} PMX differ from the {new} PMX revealed since")
+            # sized on the gross splits: the net ones are never longer, so the fee stays enough
+            tx["splits"] = shares
+            fee = wallets.set_fee(tx, kind)
+            if fee > new:
+                raise ValueError(f"the settlement fee ({fee} PMX) is more than the {new} PMX revealed")
+            tx["splits"] = self._net(shares, fee)
         wallets.sign_tx(tx, seller_wallet, chain_)
         return tx
+
+    def payout_tx(self, chain_, seller_wallet, cid: str) -> dict:
+        """Hub mode: a signed channel_payout paying every seller its credits not paid out yet,
+        up to the best word seen; the channel stays open. Everything it needs to know about
+        earlier payouts is on the chain (paid_ticks, paid_shares): rebuilt after a crash, it
+        never pays a tick twice (the ledger refuses ticks at or below paid_ticks anyway)."""
+        c = chain_.ledger.channels.get(cid)
+        b, cr = self._snapshot(cid)
+        if c is None or not c["open"] or c["seller"] != self.seller:
+            raise ValueError("no open hub channel with that id")
+        if not b or not cr:
+            raise ValueError("no hub credits on this channel")
+        paid_i = c.get("paid_ticks", 0)
+        new = (b["i"] - paid_i) * c["unit"]
+        if new <= 0:
+            raise ValueError("nothing new to pay out")
+        shares = self._unpaid(cr, c)
+        if sum(shares.values()) != new:
+            raise ValueError(f"unpaid hub credits {sum(shares.values())} PMX differ from the {new} PMX revealed since")
+        tx = chain_.new_tx(self.seller, self.seller, new, "channel:payout")
+        tx.update(kind="channel_payout", channel=cid, ticks=b["i"], word=b["w"], shares=shares, splits=dict(shares))
+        kind = seller_wallet.kind(seller_wallet.index_of(chain_.current_key(seller_wallet.address)))
+        fee = wallets.set_fee(tx, kind)
+        if fee >= new:
+            raise ValueError(f"{new} PMX is not worth a payout with a {fee} PMX fee")
+        tx["splits"] = self._net(shares, fee)
+        wallets.sign_tx(tx, seller_wallet, chain_)
+        return tx
+
+    def unpaid(self, chain_) -> dict:
+        """Hub mode: open channels with revealed ticks not paid out yet -> PMX."""
+        out = {}
+        with chain_.lock:
+            for cid, c in chain_.ledger.channels.items():
+                if c["open"] and c["seller"] == self.seller:
+                    b = self.best(cid)
+                    if b and b["i"] > c.get("paid_ticks", 0) and self.credits.get(cid):
+                        out[cid] = (b["i"] - c.get("paid_ticks", 0)) * c["unit"]
+        return out
 
     def expiring(self, chain_, within: int) -> list:
         """Open channels this seller was paid on that expire within `within` blocks."""
@@ -237,7 +295,7 @@ def refund_tx(chain_, wallet, cid: str) -> dict:
     c = chain_.ledger.channels.get(cid)
     if c is None:
         raise ValueError("unknown channel")
-    tx = chain_.new_tx(wallet.address, wallet.address, c["n"] * c["unit"], "channel:refund")
+    tx = chain_.new_tx(wallet.address, wallet.address, (c["n"] - c.get("paid_ticks", 0)) * c["unit"], "channel:refund")
     tx.update(kind="channel_refund", channel=cid)
     wallets.sign_tx(tx, wallet, chain_)
     return tx

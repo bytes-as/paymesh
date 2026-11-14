@@ -134,7 +134,7 @@
 
   // --- WOTS v2 (wallets.py: derive_wots2, _chain2, _wots_digits, _digest2) -------------------
   const WOTS_W = 16, WOTS_L = 67;
-  const EXTRA_FIELDS = ["kind", "anchor", "ticks", "unit", "expires", "channel", "word", "splits", "fee"];
+  const EXTRA_FIELDS = ["kind", "anchor", "ticks", "unit", "expires", "channel", "word", "splits", "fee", "shares"];
   const FEE_BYTES = 8192;
 
   function chain2(pkSeed, j, x, start, steps) {

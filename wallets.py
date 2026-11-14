@@ -159,7 +159,7 @@ def pubkey_fingerprint(pub: list) -> str:
     return sha256_hex("".join(pub).encode())
 
 
-EXTRA_FIELDS = ("kind", "anchor", "ticks", "unit", "expires", "channel", "word", "splits", "fee")
+EXTRA_FIELDS = ("kind", "anchor", "ticks", "unit", "expires", "channel", "word", "splits", "fee", "shares")
 
 # --- fees: every signed tx burns at least 1 PMX per started FEE_BYTES of its stored size,
 # so chain growth costs (chain.py enforces it for blocks from FEE_EPOCH on) ---

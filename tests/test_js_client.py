@@ -92,6 +92,9 @@ class Vectors(unittest.TestCase):
                   "kind": "channel_close", "channel": "66" * 32, "ticks": 9, "word": "77" * 32,
                   "splits": [["88" * 32, 5], ["99" * 32, 3]], "fee": 1}),
             (40, {"from_wallet": w.address, "to_wallet": to, "amount": 1, "memo": "m" * 9000, "txid": "aa" * 32}),  # fee 2
+            (41, {"from_wallet": w.address, "to_wallet": w.address, "amount": 8, "memo": "channel:payout", "txid": "bb" * 32,
+                  "kind": "channel_payout", "channel": "66" * 32, "ticks": 20, "word": "77" * 32,
+                  "shares": {"88" * 32: 5, "99" * 32: 3}, "splits": {"88" * 32: 4, "99" * 32: 3}}),
         ]
 
     def test_signed_txs_match_python_byte_for_byte(self):
@@ -105,7 +108,7 @@ class Vectors(unittest.TestCase):
                  "return input.cases.map(([i, tx]) => P.pyJson(P.signTx(tx, w, i), true));",
                  {"seed": SEED.hex(), "cases": cases})
         self.assertEqual(out, py)
-        self.assertEqual([json.loads(s)["fee"] for s in out], [1, 1, 1, 1, 2])
+        self.assertEqual([json.loads(s)["fee"] for s in out], [1, 1, 1, 1, 2, 1])
         for (i, _), s in zip(cases, out):  # and Python's verifier accepts the JS signatures
             self.assertEqual(wallets.verify_tx(json.loads(s), w.key_fp(i)), (True, "ok"))
             bad = json.loads(s)
