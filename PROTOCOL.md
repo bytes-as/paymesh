@@ -167,15 +167,31 @@ fingerprint of the sender's next key in `next_key`; the ledger accepts the
 sender's next tx only from that key. A key never verifies twice, so the half
 of a one-time key that a signature publishes is useless to anyone else.
 
-* **WOTS (w=16)**, used for all new keys: the message digest is
-  `sha256(from|to|amount|memo|txid|next_key[|json(kind, anchor, ticks, unit, expires, channel, word)])`.
-  Its 64 base-16 digits plus a 3-digit checksum (`sum(15 - d)`) pick how far
-  each of 67 hash chains is walked. `sig[j] = sha256^(d_j)(sk_j)`. The verifier
-  finishes each chain (`15 - d_j` more steps) and compares
-  `sha256("wots1" | pk_0 | ... | pk_66)` to the expected key fingerprint.
-  A signed tx is about 4.9 KB.
-* **Lamport** (older wallets' last key): 256 pairs of secrets; `pub` (512
+Let `m = sha256(from|to|amount|memo|txid|next_key[|json(kind, anchor, ticks, unit, expires, channel, word)])`.
+The verifier tells the scheme apart by the signature's shape:
+
+* **WOTS v2 (w=16)**, used for all new keys; `sig` has 68 elements. Key `i` has a
+  public seed `P` (`sig[0]`). Every chain step is its own hash,
+  `F(P, j, s, x) = sha256(P | 0x02 | byte j | byte s | x)`: the "simple"
+  tweakable hash of SPHINCS+, in place of WOTS+ bitmasks. A preimage found for
+  one chain position of one key is no use at any other position or key (no
+  multi-target attacks), and v1/v2 values can't be swapped. The digest is
+  `d = sha256("paymesh-wots2-msg" | P | m)`; its 64 base-16 digits plus a
+  3-digit checksum (`sum(15 - d)`) say how far each of 67 chains is walked:
+  `sig[1+j] = F` applied for steps `0 .. d_j - 1` to `sk_j`. The verifier walks
+  steps `d_j .. 14` and compares `sha256("wots2" | P | pk_0 | ... | pk_66)` to
+  the expected key fingerprint. About 4.98 KB per tx. On this machine, signing
+  takes 1.6 ms (v1: 1.2 ms) and verifying 0.55 ms (v1: 0.43 ms).
+* **WOTS v1** (keys made before wallet format 5): 67 elements, plain
+  `sha256` chains, digest `m`, fingerprint `sha256("wots1" | pk_0 | ... | pk_66)`.
+* **Lamport** (keys made before WOTS): 256 pairs of secrets; `pub` (512
   hashes) travels with the tx; fingerprint `sha256(concat(pub hex))`. About 52 KB.
+
+Migration: an older wallet's current key is already named on chain, so it signs
+once more in its own scheme and commits to a v2 key as `next_key`. From then on
+the wallet signs only with v2 (wallet file format 5 records `wots2_from`). The
+ledger keeps verifying all three schemes, so every block written before keeps
+replaying.
 
 ## 5. Chain file
 

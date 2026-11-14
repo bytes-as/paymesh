@@ -70,13 +70,16 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (64 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (72 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
-`py -3 attacks.py` runs 27 attacks against a scratch node and shows each refused.
+`py -3 attacks.py` runs 29 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
-  extended into a forgery; a spent key never verifies again.
+  extended into a forgery; a spent key never verifies again. New keys are
+  WOTS v2: every hash-chain step is a different hash (per-key public seed,
+  chain and step number), so values published by one key are useless under
+  another, and old wallets move to v2 at their next signature.
 * **No overspending, negative or zero amounts, or minting.** Pending txs count
   against the balance; only `GET /faucet` mints, at most 100 PMX.
 * **A signed tx counts once.** Resubmitting it is refused.
@@ -127,7 +130,7 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
 | file | role |
 |---|---|
 | `chain.py` | ledger rules, blocks, PoW, append-only `chain.json` |
-| `wallets.py` | one-time keys (WOTS, Lamport for old keys), rotation, signing |
+| `wallets.py` | one-time keys (WOTS v2; WOTS v1 and Lamport for old keys), rotation, signing |
 | `channels.py` | PayWord payment channels: buyer hash chain, seller log |
 | `durable.py` | append-only logs, atomic replaces, fsync policy (`PAYMESH_FSYNC`), torn-tail repair |
 | `paymesh_x402.py` | x402 v2 wire format: `PAYMENT-REQUIRED` / `-SIGNATURE` / `-RESPONSE` for the `paymesh` scheme |
