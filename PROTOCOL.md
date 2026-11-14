@@ -62,8 +62,30 @@ keeps a refused tx never holds two signatures from one key.
 Tested against the reference Python SDK (`x402` 2.27.0 from PyPI, installed in a scratch
 venv, never imported by paymesh): its parser reads our `PAYMENT-REQUIRED`, its `requests` wrapper pays
 a route end to end through a small `paymesh` scheme plugin, and its own
-`PaymentPayload` encoder pays a channel tick (`interop/x402_reference.py`). Not done: CORS headers for browser
-clients, the facilitator endpoints (`/verify`, `/settle`, `/supported`), x402 v1.
+`PaymentPayload` encoder pays a channel tick, and its facilitator client drives the node's
+`/supported`, `/verify` and `/settle` (`interop/x402_reference.py`). Not done: x402 v1.
+
+### 0b. Facilitator (`facilitator.py`)
+
+A resource server that runs no paymesh code delegates to the node, as in spec section 7.
+`POST /verify` and `POST /settle` take `{"x402Version": 2, "paymentPayload",
+"paymentRequirements"}` and always answer `200` with a `VerifyResponse` (`isValid`,
+`invalidReason`, `payer`) or a `SettlementResponse`. Only an unreadable body gets `400`.
+`GET /supported` lists `{"x402Version": 2, "scheme": "paymesh", "network"}` and the hub as
+signer (`"paymesh:*"`).
+
+* `tx`, `{"transaction"}`: verify runs the ledger's own checks (signature, current key,
+  balance with fee, unused txid) without applying anything; settle puts it on chain. A
+  mining timeout answers `settlement_pending` with the txid, and settling again after it
+  is mined succeeds once. `{"txid"}`: a mined tx paying `payTo` exactly `amount`.
+* With `extra.memo` in the requirements, the tx memo must equal it: a payment made for
+  one order can't be passed off for another (`invalid_paymesh_challenge`).
+* A payment settles once. Settled txids are logged and fsynced before `success` goes
+  out, so a resource server is never told `success` twice for one payment, also across
+  node restarts.
+* `channel`: only words of channels opened to the node's hub (1c). The hub credits
+  `payTo` and pays it in its close (splits). A direct channel can only be closed with
+  its seller's key, so the facilitator refuses it.
 
 The headers below (`X-Payment`, `X-Channel`) still work.
 

@@ -76,9 +76,9 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (92 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (100 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
-`py -3 attacks.py` runs 38 attacks against a scratch node and shows each refused.
+`py -3 attacks.py` runs 43 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
@@ -139,8 +139,9 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
   unless created with `wallet.py new <name> --encrypt` (scrypt + HMAC-SHA256,
   passphrase from `PAYMESH_PASSPHRASE`).
 * Rate limits are per client IP, so clients behind one address share them.
-* x402: v2 HTTP headers only; no CORS headers for browser clients, no facilitator
-  endpoints (`/verify`, `/settle`), no v1 (`X-PAYMENT`, which here is the native txid header).
+* x402: v2 only, no v1 (`X-PAYMENT`, which here is the native txid header). The node is
+  also an x402 facilitator (`/verify`, `/settle`, `/supported`) for resource servers
+  that run no paymesh code.
 
 ## Files
 
@@ -150,6 +151,7 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
 | `wallets.py` | one-time keys (WOTS v2; WOTS v1 and Lamport for old keys), rotation, signing |
 | `channels.py` | PayWord payment channels: buyer hash chain, seller log |
 | `durable.py` | append-only logs, atomic replaces, fsync policy (`PAYMESH_FSYNC`), torn-tail repair |
+| `facilitator.py` | x402 facilitator: `/verify`, `/settle`, `/supported` for the `paymesh` scheme |
 | `paymesh_x402.py` | x402 v2 wire format: `PAYMENT-REQUIRED` / `-SIGNATURE` / `-RESPONSE` for the `paymesh` scheme |
 | `paywall.py` | 402 challenges and on-chain payment checks |
 | `server.py` | demo paid API: prices, `/tx`, `/account`, `/faucet`, `/stats`, channel routes, miner, rate limits |
