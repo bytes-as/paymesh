@@ -1,0 +1,100 @@
+"""Benchmark: paid calls per second, on-chain vs payment channel.
+
+Starts a separate paymesh server (its own PAYMESH_HOME and ports, never the
+live one), then a client with its own wallet folder pays for /premium/price:
+    py -3 bench.py [on_chain_calls] [channel_calls]
+"""
+import json
+import os
+import socket
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def run(n_chain: int, n_chan: int):
+    home, client_home = tempfile.mkdtemp(), tempfile.mkdtemp()
+    port, eport = free_port(), free_port()
+    env = dict(os.environ, PAYMESH_HOME=home, PAYMESH_API_PORT=str(port), PAYMESH_EXPLORER_PORT=str(eport))
+    srv = subprocess.Popen([sys.executable, os.path.join(HERE, "paymesh.py"), "serve"], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        url = f"http://127.0.0.1:{port}"
+        for _ in range(100):
+            try:
+                urllib.request.urlopen(url + "/health", timeout=1).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+        import wallets
+        wallets.WALLET_DIR = os.path.join(client_home, "wallets")  # the client keeps its own keys
+        from paymesh_client import Client
+
+        def chain_bytes():
+            return os.path.getsize(os.path.join(home, "chain.json"))
+
+        c = Client(url, "bench")
+        for _ in range((n_chain + n_chan) * 5 // 100 + 2):  # 5 PMX per call, 100 per faucet
+            c.faucet()
+        out = {}
+
+        # on-chain: every call is 402 -> signed tx -> mined block -> retry
+        b0, lat = chain_bytes(), []
+        t0 = time.perf_counter()
+        for _ in range(n_chain):
+            t = time.perf_counter()
+            code, _ = c.get("/premium/price")
+            assert code == 200
+            lat.append(time.perf_counter() - t)
+        dt = time.perf_counter() - t0
+        out["on_chain"] = {"calls": n_chain, "calls_per_s": round(n_chain / dt, 1),
+                           "p50_ms": round(statistics.median(lat) * 1000, 2),
+                           "p95_ms": round(sorted(lat)[int(len(lat) * 0.95) - 1] * 1000, 2),
+                           "chain_bytes_per_call": (chain_bytes() - b0) // n_chain}
+
+        # channel: one open, n calls carrying a hash-chain word, one close
+        b0 = chain_bytes()
+        t0 = time.perf_counter()
+        c.open_channel(ticks=n_chan * 5)
+        t_open = time.perf_counter() - t0
+        c.get("/premium/price")  # learn the price
+        lat = []
+        t1 = time.perf_counter()
+        for _ in range(n_chan - 1):
+            t = time.perf_counter()
+            code, _ = c.get("/premium/price")
+            assert code == 200
+            lat.append(time.perf_counter() - t)
+        dt_calls = time.perf_counter() - t1
+        t2 = time.perf_counter()
+        settled = c.close_channel()
+        t_close = time.perf_counter() - t2
+        out["channel"] = {"calls": n_chan, "calls_per_s": round((n_chan - 1) / dt_calls, 1),
+                          "p50_ms": round(statistics.median(lat) * 1000, 2),
+                          "p95_ms": round(sorted(lat)[int(len(lat) * 0.95) - 1] * 1000, 2),
+                          "open_ms": round(t_open * 1000, 1), "close_ms": round(t_close * 1000, 1),
+                          "paid_to_seller": settled["paid_to_seller"],
+                          "chain_bytes_per_call": (chain_bytes() - b0) // n_chan}
+        out["speedup"] = round(out["channel"]["calls_per_s"] / out["on_chain"]["calls_per_s"], 1)
+        return out
+    finally:
+        srv.kill()
+        srv.wait()
+
+
+if __name__ == "__main__":
+    a = int(sys.argv[1]) if len(sys.argv) > 1 else 100
+    b = int(sys.argv[2]) if len(sys.argv) > 2 else 2000
+    print(json.dumps(run(a, b), indent=1))
