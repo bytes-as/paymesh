@@ -80,6 +80,7 @@ setInterval(()=>fetch('/data.json').then(r=>r.json()).then(render).catch(()=>{})
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    disable_nagle_algorithm = True  # TCP_NODELAY (Linux delayed-ACK stalls)
     def log_message(self, fmt, *args):
         pass
 

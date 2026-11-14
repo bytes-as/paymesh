@@ -12,7 +12,7 @@ import os
 import random
 import socketserver
 import sys
-from wsgiref.simple_server import WSGIServer, make_server
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from paymesh_seller import Paywall  # noqa: E402
@@ -32,6 +32,10 @@ def weather_app(environ, start_response):
     return [data]
 
 
+class NoDelayHandler(WSGIRequestHandler):
+    disable_nagle_algorithm = True  # TCP_NODELAY: no ~40 ms delayed-ACK stall on Linux
+
+
 class ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
     daemon_threads = True
 
@@ -45,6 +49,6 @@ if __name__ == "__main__":
     node = os.environ.get("PAYMESH_API") or f"http://127.0.0.1:{os.environ.get('PAYMESH_API_PORT', 8402)}"
     port = int(os.environ.get("WEATHER_PORT", 8404))
     _, app = build(node)
-    httpd = make_server("127.0.0.1", port, app, server_class=ThreadingWSGIServer)
+    httpd = make_server("127.0.0.1", port, app, server_class=ThreadingWSGIServer, handler_class=NoDelayHandler)
     print(f"[weather] http://127.0.0.1:{port}/forecast costs 3 PMX (node {node})")
     httpd.serve_forever()
