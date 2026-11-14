@@ -44,6 +44,9 @@ both settle before the resource runs, so `extra.paymentFlow` is `upfront` (spec 
   then takes the word, and the channel id is the open's txid. This is how a client that can't post
   to `/tx` (a browser page, 0c) gets a channel. The channel offer's `extra.height`, the chain
   height, lets it set `expires`. A pending or refused open answers as a tx payment would.
+  The open is mined before the word is checked, so `invalid_paymesh_channel_payment` on an
+  opening payload means the channel exists and only the word was refused: the client keeps
+  the channel (nothing spent) and moves to its next key.
   The open may also lock the deposit for the seller's hub (`extra.hub`): that one channel
   then pays any seller that takes hub channels (1c).
 

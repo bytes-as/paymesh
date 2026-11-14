@@ -164,7 +164,7 @@ through the hub's book, payouts running) did a median 1,288 paid calls per secon
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (135 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (136 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
 `py -3 attacks.py` runs 50 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about two
