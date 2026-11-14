@@ -32,6 +32,8 @@ code{color:#ffa657}
 </style></head><body>
 <h1>paymesh explorer</h1>
 <div class="stats" id="stats"></div>
+<h2>seller revenue <span class="dim">(since the API started)</span></h2>
+<table id="rev"><tr><th>route</th><th>paid calls</th><th>on-chain</th><th>channel</th><th>revenue PMX</th></tr></table>
 <h2>payment channels</h2>
 <table id="chans"><tr><th>channel</th><th>buyer</th><th>seller</th><th>deposit PMX</th><th>paid PMX</th><th>expires at block</th><th>state</th></tr></table>
 <h2>chain <span class="dim">(last 50 blocks)</span></h2>
@@ -48,6 +50,10 @@ const ESC = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
 const esc = s => String(s).replace(/[&<>"']/g, ch => ESC[ch]);
 const st = document.getElementById('stats');
 data.stats.forEach(([k,v])=>st.insertAdjacentHTML('beforeend', `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`));
+const rv = document.getElementById('rev');
+const rs = data.revenue && data.revenue.routes || {};
+Object.entries(rs).forEach(([p,r])=>rv.insertAdjacentHTML('beforeend', `<tr><td><code>${esc(p)}</code></td><td>${esc(r.calls)}</td><td>${esc(r.on_chain)}</td><td>${esc(r.channel)}</td><td class="ok">${esc(r.revenue)}</td></tr>`));
+if(!Object.keys(rs).length) rv.insertAdjacentHTML('beforeend','<tr><td colspan="5" class="dim">no paid calls yet</td></tr>');
 const ch = document.getElementById('chans');
 data.channels.forEach(x=>ch.insertAdjacentHTML('beforeend', `<tr><td><code>${esc(x.id.slice(0,12))}..</code></td><td>${esc(x.buyer_name)}</td><td>${esc(x.seller_name)}</td><td>${esc(x.deposit)}</td><td class="ok">${esc(x.paid)}</td><td>${esc(x.expires)}</td><td>${x.open?'<span class="ok">open</span>':'settled'}</td></tr>`));
 if(!data.channels.length) ch.insertAdjacentHTML('beforeend','<tr><td colspan="7" class="dim">no channels yet</td></tr>');
@@ -94,7 +100,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "txs": txs, "stats": stats, "channels": channels_view,
                     "balances": chain_inst.balances(),
                     "prices": PRICES_MAP,
-                    "names": names}
+                    "names": names, "revenue": _revenue()}
             # "<" escaped so no value (a memo) can close the <script> it sits in
             self._send(200, PAGE.replace("DATA", json.dumps(data).replace("<", "\\u003c")))
 
@@ -105,6 +111,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+def _revenue() -> dict:
+    """The API's /stats, when it runs in this process (paymesh.py serves both)."""
+    srv = sys.modules.get("server")
+    return srv.STATS.view() if srv is not None and hasattr(srv, "STATS") else {}
 
 
 def _slim(tx: dict) -> dict:

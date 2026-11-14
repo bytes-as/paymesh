@@ -15,6 +15,7 @@ import os
 import random
 import sys
 import threading
+import time
 import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +36,35 @@ price_history = [{"t": i, "price": round(100.0 + random.random() * 10, 4)} for i
 
 chain_lock = threading.Lock()
 mined = threading.Condition()  # notified after every block
+
+
+class Stats:
+    """Paid calls and revenue per route, by payment mode, since the server started."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.routes: dict = {}
+        self.payers: set = set()
+        self.started = time.time()
+
+    def record(self, path: str, mode: str, amount: int, payer: str):
+        with self.lock:
+            r = self.routes.setdefault(path, {"calls": 0, "revenue": 0, "on_chain": 0, "channel": 0})
+            r["calls"] += 1
+            r["revenue"] += amount
+            r[mode] += 1
+            self.payers.add(payer)
+
+    def view(self) -> dict:
+        with self.lock:
+            up = max(1e-9, time.time() - self.started)
+            calls = sum(r["calls"] for r in self.routes.values())
+            return {"uptime_s": round(up), "paid_calls": calls, "revenue": sum(r["revenue"] for r in self.routes.values()),
+                    "calls_per_s": round(calls / up, 2), "distinct_payers": len(self.payers),
+                    "routes": {p: dict(r) for p, r in sorted(self.routes.items())}}
+
+
+STATS = Stats()
 chain_inst: chain.Chain
 SELLER: wallets.Wallet
 BOOK: channels.SellerBook
@@ -61,6 +91,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok, reason = BOOK.accept(chain_inst, chan, price)
             if ok:
                 self.paid_reason = reason
+                STATS.record(path, "channel", price, chan.split()[0])
                 return True
             self._send(402, {"error": "channel payment refused", "reason": reason, "amount": price, "currency": CURRENCY})
             return False
@@ -68,6 +99,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok, reason = paywall.verify_payment(chain_inst, self.headers, path)
         if ok:
             self.paid_reason = reason
+            tx, _ = chain_inst.find_tx_by_id(self.headers.get("X-Payment", "").strip())
+            STATS.record(path, "on_chain", price, tx["from_wallet"] if tx else "?")
             return True
         ch = paywall.open_challenge(chain_inst, SELLER.address, price, path)
         ch["channel"] = _terms()  # or: open a channel once and pay calls with X-Channel
@@ -127,6 +160,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "height": chain_inst.height,
                         "channels": {k: v for k, v in chain_inst.ledger.channels.items() if v["buyer"] == addr and v["open"]}}
             self._send(200, info)
+            return
+        if self.path.startswith("/stats"):
+            self._send(200, STATS.view())
             return
         if self.path.startswith("/channel/state"):
             # the last tick this seller accepted: a restarted buyer resumes from it

@@ -54,6 +54,12 @@ class ClientSDK(unittest.TestCase):
                 c.get("/premium/price")
         res = c.close_channel()
         self.assertEqual(res["paid_to_seller"], 80)
+        code, st = c._req("/stats")
+        r = st["routes"]["/premium/price"]
+        self.assertEqual(code, 200)
+        self.assertGreaterEqual(r["on_chain"], 1)
+        self.assertGreaterEqual(r["channel"], 12)  # 10 + 2 before the channel ran dry
+        self.assertGreaterEqual(st["routes"]["/premium/history"]["revenue"], 20)
         self.assertEqual(self.chain.height, blocks_before + 1)  # the whole channel cost 2 blocks
         self.assertEqual(c.balance(), 15)
 
