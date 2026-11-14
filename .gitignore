@@ -11,3 +11,6 @@ buyer_channels/
 *.ckpt
 chain.v1-*.json
 *.channels.log
+hub_channels.log
+facilitator_settled.log
+crashed-at-*
