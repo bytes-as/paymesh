@@ -7,6 +7,7 @@ Stdlib only.
 """
 import atexit
 import http.client
+import json
 import os
 import shutil
 import socket
@@ -245,6 +246,39 @@ def run(node: str, restart=None) -> list:
     attempt("facilitator: settle a forged tx from a victim", lambda: fac("/settle", x402.requirement(net, shop_addr, 7, "tx", 60),
                                                                         {"transaction": forged}),
             lambda c, b: c == 200 and b.get("success") is False)
+    # --- browsers: paid routes are CORS-open; nothing else answers a page on another site ---
+    nu = urllib.parse.urlsplit(node)
+
+    def from_evil_page(method, path, body=None, **extra):
+        c = http.client.HTTPConnection(nu.hostname, nu.port, timeout=30)
+        try:
+            hdrs = {"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site", "Content-Type": "text/plain"}
+            hdrs.update(extra)
+            c.request(method, path, body=body, headers=hdrs)
+            r = c.getresponse()
+            data = r.read()
+            return r.status, {"acao": r.getheader("Access-Control-Allow-Origin"), "body": data[:80].decode(errors="replace")}
+        finally:
+            c.close()
+    v0 = victim.balance()
+    attempt("browser: a foreign page mints coins with an <img> GET /faucet",
+            lambda: from_evil_page("GET", f"/faucet?address={victim.wallet.address}"),
+            lambda c, b: c == 403 and b["acao"] is None and victim.balance() == v0)
+    evil_bc = chn.BuyerChannel(10)
+    led = me._ledger()
+    evil_open = led.new_tx(me.wallet.address, seller, 10, "channel:open")
+    evil_open.update(kind="channel_open", anchor=evil_bc.anchor, ticks=10, unit=1, expires=height() + 50)
+    wallets.sign_tx(evil_open, me.wallet, led)
+    attempt("browser: a foreign page opens a channel (text/plain POST /tx)",
+            lambda: from_evil_page("POST", "/tx", json.dumps(evil_open)),
+            lambda c, b: c == 403 and b["acao"] is None and me._node(f"/tx?id={evil_open['txid']}")[0] == 404)
+    attempt("browser: a foreign page reads a victim's /account",
+            lambda: from_evil_page("GET", f"/account?address={victim.wallet.address}"),
+            lambda c, b: c == 403 and b["acao"] is None)
+    attempt("browser: preflight a JSON POST /tx from a foreign page",
+            lambda: from_evil_page("OPTIONS", "/tx", **{"Access-Control-Request-Method": "POST",
+                                                       "Access-Control-Request-Headers": "content-type"}),
+            lambda c, b: c == 403 and b["acao"] is None)
     attempt("wallet name that escapes the wallet folder", lambda: me._node("/faucet?name=../../evil"), no)
     attempt("malformed JSON body", lambda: raw_post(node, "/tx", b"{"), lambda c, b: c == 400)
     # the same race against a seller running apart from the node (examples/weather_api.py)
