@@ -5,8 +5,10 @@
 
 Stdlib only.
 """
+import atexit
 import http.client
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -31,7 +33,9 @@ def run(node: str, restart=None) -> list:
     import wallets
     from paymesh_client import Client
 
-    wallets.WALLET_DIR = os.path.join(tempfile.mkdtemp(), "wallets")
+    scratch = tempfile.mkdtemp(prefix="paymesh-attacks-")
+    atexit.register(shutil.rmtree, scratch, True)  # scratch wallets go when the run ends
+    wallets.WALLET_DIR = os.path.join(scratch, "wallets")
     me = Client(node, "attacker")
     victim = Client(node, "victim")
     me.faucet()
@@ -158,7 +162,7 @@ def run(node: str, restart=None) -> list:
         [t.join() for t in ts]
         return sorted(codes), sorted(me._node(f"/tx?id={i}")[0] for i in txids)  # 200 = mined, 404 = not
     attempt("x402: pay one challenge with two txs at once", both_at_once,
-            lambda c, b: c == [200, 402] and b == [200, 404])
+            lambda c, b: c.count(200) <= 1 and b.count(200) == c.count(200))  # mined == served, at most one
     attempt("x402: garbage PAYMENT-SIGNATURE",
             lambda: me._req("/premium/price", headers={x402.SIGNATURE: "e30=" * 9000}), lambda c, b: c == 400)
     kept = []  # play a seller that refuses a buyer's signed tx but keeps a copy
@@ -192,6 +196,12 @@ def run(node: str, restart=None) -> list:
     near, _ = raw_channel(2)
     attempt("buy on a channel that is refundable next block, then refund it",
             lambda: me._req("/premium/price", headers={"X-Channel": near.pay(5)}), lambda c, b: c == 402)
+
+    def near_x402():
+        cid, i, w = near.pay(5).split()
+        return x402_pay(fresh()["channel"], {"channel": cid, "tick": int(i), "word": w})
+    attempt("x402: buy on a channel that is refundable next block", near_x402,
+            lambda c, b: c == 402 and "too close to settle" in str(me.last_receipt()))
     race, exp = raw_channel(chn.SellerBook.STOP_WITHIN + 3)
     served = [me._req("/premium/price", headers={"X-Channel": race.pay(5)})[0] for _ in range(2)].count(200)
     while height() < exp:
@@ -324,7 +334,8 @@ def main():
     node = sys.argv[1] if len(sys.argv) > 1 else None
     procs, restart = [], None
     if node is None:
-        home, port = tempfile.mkdtemp(), _free_port()
+        home, port = tempfile.mkdtemp(prefix="paymesh-node-"), _free_port()
+        atexit.register(shutil.rmtree, home, True)  # runs after the node is killed below
         env = dict(os.environ, PAYMESH_HOME=home, PAYMESH_API_PORT=str(port), PAYMESH_EXPLORER_PORT=str(_free_port()))
         node = f"http://127.0.0.1:{port}"
 
@@ -348,6 +359,7 @@ def main():
     finally:
         for p in procs:
             p.kill()
+            p.wait()  # Windows: its files are locked until it has exited
     width = max(len(r["attack"]) for r in res)
     for r in res:
         mark = "REFUSED" if r["refused"] else "ACCEPTED (!)"

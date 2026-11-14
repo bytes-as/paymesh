@@ -53,7 +53,7 @@ class PaymeshTx:
 
 
 def main():
-    home, port = tempfile.mkdtemp(), free_port()
+    home, port = tempfile.mkdtemp(prefix="paymesh-interop-"), free_port()
     env = dict(os.environ, PAYMESH_HOME=home, PAYMESH_API_PORT=str(port), PAYMESH_EXPLORER_PORT=str(free_port()))
     node = subprocess.Popen(["py", "-3", os.path.join(PAYMESH, "paymesh.py"), "serve"], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -65,7 +65,7 @@ def main():
                 break
             except OSError:
                 time.sleep(0.1)
-        wallets.WALLET_DIR = os.path.join(tempfile.mkdtemp(), "wallets")
+        wallets.WALLET_DIR = os.path.join(home, "client-wallets")
         pm = Client(url, "ref-buyer")
         pm.faucet()
         out = {}
@@ -112,6 +112,9 @@ def main():
         return 0 if ok else 1
     finally:
         node.kill()
+        node.wait()
+        import shutil
+        shutil.rmtree(home, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -462,7 +462,9 @@ if __name__ == "__main__":
     import tempfile
     import chain as ch
 
-    tmp = tempfile.mkdtemp()
+    tmp = tempfile.mkdtemp(prefix="paymesh-selftest-")
+    import atexit, shutil  # noqa: E401 - scratch data goes when the run ends
+    atexit.register(shutil.rmtree, tmp, True)
     WALLET_DIR = os.path.join(tmp, "wallets")
     c = ch.Chain(os.path.join(tmp, "chain.json"))
     c.genesis()

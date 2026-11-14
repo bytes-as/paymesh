@@ -25,7 +25,10 @@ def free_port():
 
 
 def run(n_chain: int, n_chan: int):
-    home, client_home = tempfile.mkdtemp(), tempfile.mkdtemp()
+    home, client_home = tempfile.mkdtemp(prefix="paymesh-bench-"), tempfile.mkdtemp(prefix="paymesh-bench-")
+    import atexit, shutil  # noqa: E401
+    for d in (home, client_home):
+        atexit.register(shutil.rmtree, d, True)  # scratch chain and wallets go when the run ends
     port, eport = free_port(), free_port()
     env = dict(os.environ, PAYMESH_HOME=home, PAYMESH_API_PORT=str(port), PAYMESH_EXPLORER_PORT=str(eport),
                PAYMESH_FAUCET_BURST="100000", PAYMESH_TX_BURST="100000", PAYMESH_CHALLENGE_BURST="100000")
