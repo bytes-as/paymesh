@@ -194,7 +194,18 @@ class SellerBook:
         if cr:
             if sum(cr.values()) != tx["amount"]:
                 raise ValueError(f"hub credits {sum(cr.values())} PMX differ from the {tx['amount']} PMX revealed")
+            # the fee comes out of the shares, largest first. Sized on the gross splits: the
+            # net ones are never longer, so the fee stays enough
             tx["splits"] = cr
+            kind = seller_wallet.kind(seller_wallet.index_of(chain_.current_key(seller_wallet.address)))
+            left = wallets.set_fee(tx, kind)
+            if left > tx["amount"]:
+                raise ValueError(f"the settlement fee ({left} PMX) is more than the {tx['amount']} PMX revealed")
+            for who in sorted(cr, key=lambda k: (-cr[k], k)):
+                take = min(cr[who], left)
+                cr[who] -= take
+                left -= take
+            tx["splits"] = {k: v for k, v in cr.items() if v > 0}
         wallets.sign_tx(tx, seller_wallet, chain_)
         return tx
 

@@ -39,10 +39,10 @@ class ClientSDK(unittest.TestCase):
         self.assertEqual(c.balance(), 100)
         code, body = c.get("/premium/price")  # no channel: one on-chain tx
         self.assertEqual(code, 200, body)
-        self.assertEqual(c.balance(), 95)
+        self.assertEqual(c.balance(), 94)  # 5 + a 1 PMX fee
         self.assertEqual(c.get("/open/info")[0], 200)  # free route, nothing paid
         c.open_channel(ticks=80)
-        self.assertEqual(c.balance(), 15)  # 80 locked
+        self.assertEqual(c.balance(), 13)  # 80 locked, 1 fee
         for _ in range(10):
             code, body = c.get("/premium/price")  # 5 ticks each, no txs
             self.assertEqual(code, 200, body)
@@ -61,7 +61,7 @@ class ClientSDK(unittest.TestCase):
         self.assertGreaterEqual(r["channel"], 12)  # 10 + 2 before the channel ran dry
         self.assertGreaterEqual(st["routes"]["/premium/history"]["revenue"], 20)
         self.assertEqual(self.chain.height, blocks_before + 1)  # the whole channel cost 2 blocks
-        self.assertEqual(c.balance(), 15)
+        self.assertEqual(c.balance(), 13)
 
     def test_channel_resumes_after_restart(self):
         c = Client(self.url, "sdk-resume")

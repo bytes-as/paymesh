@@ -41,7 +41,7 @@ class WOTS2(Scratch):
         self.assertEqual(wallets.signer_key(tx), w.address)
         self.c.add_tx(tx)
         self.c.mine()
-        self.assertEqual(self.c.balance(w.address), 99)
+        self.assertEqual(self.c.balance(w.address), 98)  # 1 + fee 1
 
     def test_v4_wallet_signs_once_more_as_v1_then_v2_and_history_reloads(self):
         w = self.old_wallet("old4", 4)
@@ -54,7 +54,7 @@ class WOTS2(Scratch):
         self.assertEqual(sizes, [wallets.WOTS_L, wallets.WOTS2_SIG, wallets.WOTS2_SIG])
         self.assertEqual(wallets.load("old4").wots2_from, 1)  # saved as v5
         again = ch.Chain(self.c.path)  # replays the v1 and the v2 signatures
-        self.assertEqual(again.balance(w.address), 97)
+        self.assertEqual(again.balance(w.address), 94)  # 3 x (1 + fee 1)
         self.assertTrue(again.valid()[0])
 
     def test_v3_lamport_wallet_moves_straight_to_v2(self):
@@ -114,7 +114,7 @@ class WOTS2(Scratch):
                 target["sig"] = sig
                 with self.assertRaises(ValueError):
                     self.c.add_tx(target)
-        self.assertEqual(self.c.balance(victim.address), 92)
+        self.assertEqual(self.c.balance(victim.address), 84)
 
 
 if __name__ == "__main__":

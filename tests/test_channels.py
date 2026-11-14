@@ -28,15 +28,15 @@ class ChannelBase(Scratch):
 class ChannelLedger(ChannelBase):
     def test_honest_flow_settles_exactly(self):
         self.open(ticks=100)
-        self.assertEqual(self.c.balance(self.buyer.address), 400)  # 100 locked
+        self.assertEqual(self.c.balance(self.buyer.address), 399)  # 100 locked, 1 fee
         for _ in range(7):  # 7 calls at 5 PMX
             ok, why = self.book.accept(self.c, self.bc.pay(5), 5)
             self.assertTrue(ok, why)
         tx = self.book.close_tx(self.c, self.seller, self.bc.id)
         self.c.add_tx(tx)
         self.c.mine()
-        self.assertEqual(self.c.balance(self.seller.address), 35)
-        self.assertEqual(self.c.balance(self.buyer.address), 465)
+        self.assertEqual(self.c.balance(self.seller.address), 34)  # 35, the close's fee out of it
+        self.assertEqual(self.c.balance(self.buyer.address), 464)
         self.assertTrue(self.c.valid()[0])
         self.assertTrue(ch.Chain(self.c.path).valid()[0])  # reloads clean
 
@@ -74,7 +74,7 @@ class ChannelLedger(ChannelBase):
             self.c.mine()
         self.c.add_tx(channels.refund_tx(self.c, self.buyer, self.bc.id))
         self.c.mine()
-        self.assertEqual(self.c.balance(self.buyer.address), 500)
+        self.assertEqual(self.c.balance(self.buyer.address), 498)  # the open's and the refund's fees
 
     def test_open_needs_funds_and_exact_deposit(self):
         buyer = self.funded("poor", 10)

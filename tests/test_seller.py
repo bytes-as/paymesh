@@ -69,8 +69,8 @@ class SellerApart(unittest.TestCase):
             self.assertEqual(code, 200, body)
         res = c.close_channel()
         self.assertEqual(res["paid_to_seller"], 30)
-        self.assertEqual(self.chain.balance(seller), 33)
-        self.assertEqual(c.balance(), 100 - 3 - 30)
+        self.assertEqual(self.chain.balance(seller), 3 + 30 - 1)  # the close's fee out of the seller's 30
+        self.assertEqual(c.balance(), 100 - (3 + 1) - (30 + 1))  # the pay tx's and the open's fees
         self.assertTrue(self.chain.valid()[0])
 
     def test_replays_and_fakes_fail_at_the_seller(self):

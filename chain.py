@@ -37,7 +37,7 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 # the fields each kind of tx may carry: anything else is refused, so nobody can
 # staple unsigned junk onto someone else's signed tx
 _BASE = {"from_wallet", "to_wallet", "amount", "memo", "txid"}
-_SIGNED = _BASE | {"next_key", "sig", "pub", "kind"}
+_SIGNED = _BASE | {"next_key", "sig", "pub", "kind", "fee"}
 FIELDS = {"faucet": _BASE | {"kind"}, "pay": _SIGNED,
           "channel_open": _SIGNED | {"anchor", "ticks", "unit", "expires"},
           "channel_close": _SIGNED | {"channel", "ticks", "word", "splits"},
@@ -120,6 +120,8 @@ class Ledger:
         self.txids: set = set()
         self.channels: dict = {}  # open txid -> {buyer, seller, anchor, n, unit, expires, open}
         self.height = 0  # blocks applied; pending txs are judged at this height
+        self.time = 0.0  # the block's timestamp (pending txs: now): fees apply from wallets.FEE_EPOCH
+        self.burned = 0  # PMX burned as fees
 
     def current_key(self, address: str) -> str:
         return self.keys.get(address, address)  # key 0's fingerprint is the address
@@ -129,8 +131,21 @@ class Ledger:
         if not ok:
             raise ValueError(why)
 
+    def fee(self, tx) -> int:
+        """The fee tx carries, checked: 0 before FEE_EPOCH (and for the faucet); from then on
+        at least wallets.fee_for(tx), 1 PMX per started 8 KB."""
+        fee = tx.get("fee", 0)
+        if type(fee) is not int or fee < 0:
+            raise ValueError("fee must be a whole number of PMX")
+        if tx["from_wallet"] != FAUCET and self.time >= wallets.FEE_EPOCH:
+            need = wallets.fee_for(tx)
+            if fee < need:
+                raise ValueError(f"fee too low: {fee} PMX, this {wallets.tx_size(tx)}-byte tx needs {need}")
+        return fee
+
     def _check_channel(self, tx, kind):
         frm, to, amt = tx["from_wallet"], tx["to_wallet"], tx["amount"]
+        fee = self.fee(tx)
         if frm == FAUCET:
             raise ValueError("the faucet cannot use channels")
         if kind == "channel_open":
@@ -145,8 +160,8 @@ class Ledger:
             if frm == to:
                 raise ValueError("a channel pays someone else")
             self._signed_by(tx, frm)
-            if self.balances.get(frm, 0) < amt:
-                raise ValueError(f"insufficient funds: {self.balances.get(frm, 0)} PMX, needs {amt}")
+            if self.balances.get(frm, 0) < amt + fee:
+                raise ValueError(f"insufficient funds: {self.balances.get(frm, 0)} PMX, needs {amt} + fee {fee}")
             return
         cid = tx.get("channel")
         ch = self.channels.get(cid) if isinstance(cid, str) else None
@@ -164,6 +179,8 @@ class Ledger:
                 raise ValueError("word does not hash to the channel anchor in that many ticks")
             if amt != i * ch["unit"]:
                 raise ValueError("channel_close amount must equal ticks * unit")
+            if fee > amt:
+                raise ValueError(f"the settlement fee ({fee} PMX) is more than the {amt} PMX it settles")
             if "splits" in tx:
                 sp = tx["splits"]
                 if not isinstance(sp, dict) or not 1 <= len(sp) <= MAX_SPLITS:
@@ -173,8 +190,8 @@ class Ledger:
                         raise ValueError("a split payee must be a 64-hex address")
                     if type(part) is not int or part <= 0:
                         raise ValueError("a split must be a whole number of PMX above 0")
-                if sum(sp.values()) != amt:
-                    raise ValueError("splits must add up to the amount")
+                if sum(sp.values()) != amt - fee:
+                    raise ValueError("splits must add up to the amount minus the fee")
             self._signed_by(tx, frm)
             return
         if kind == "channel_refund":
@@ -184,6 +201,8 @@ class Ledger:
                 raise ValueError(f"channel refundable from block {ch['expires']}")
             if amt != ch["n"] * ch["unit"]:
                 raise ValueError("refund amount must equal the deposit")
+            if fee > amt:
+                raise ValueError("the refund fee is more than the deposit")
             self._signed_by(tx, frm)
             return
         raise ValueError(f"unknown tx kind {kind!r}")
@@ -221,31 +240,34 @@ class Ledger:
             if amt > FAUCET_MAX:
                 raise ValueError(f"a faucet mint is at most {FAUCET_MAX} PMX")
             return
+        fee = self.fee(tx)
         ok, why = wallets.verify_tx(tx, self.current_key(frm))
         if not ok:
             raise ValueError(why)
         have = self.balances.get(frm, 0)
-        if have < amt:
-            raise ValueError(f"insufficient funds: {have} PMX, needs {amt}")
+        if have < amt + fee:
+            raise ValueError(f"insufficient funds: {have} PMX, needs {amt} + fee {fee}")
 
     def apply(self, tx) -> None:
         self.check(tx)
         frm, to, amt = tx["from_wallet"], tx["to_wallet"], tx["amount"]
         kind = tx.get("kind", "pay")
+        fee = tx.get("fee", 0)
+        self.burned += fee
         if frm != FAUCET:
             self.keys[frm] = tx["next_key"]
         if kind == "pay":
             if frm != FAUCET:
-                self.balances[frm] = self.balances.get(frm, 0) - amt
+                self.balances[frm] = self.balances.get(frm, 0) - amt - fee
             self.balances[to] = self.balances.get(to, 0) + amt
         elif kind == "channel_open":  # deposit leaves the buyer, held by the channel
-            self.balances[frm] = self.balances.get(frm, 0) - amt
+            self.balances[frm] = self.balances.get(frm, 0) - amt - fee
             self.channels[tx["txid"]] = {"buyer": frm, "seller": to, "anchor": tx["anchor"], "n": tx["ticks"],
                                          "unit": tx["unit"], "expires": tx["expires"], "open": True}
         elif kind == "channel_close":
             ch = self.channels[tx["channel"]]
             deposit = ch["n"] * ch["unit"]
-            for who, part in (tx.get("splits") or {ch["seller"]: amt}).items():
+            for who, part in (tx.get("splits") or {ch["seller"]: amt - fee}).items():
                 self.balances[who] = self.balances.get(who, 0) + part  # a hub pays its sellers here
             self.balances[ch["buyer"]] = self.balances.get(ch["buyer"], 0) + deposit - amt
             ch.update(open=False, paid=amt)
@@ -253,7 +275,7 @@ class Ledger:
                 ch["splits"] = dict(tx["splits"])
         elif kind == "channel_refund":
             ch = self.channels[tx["channel"]]
-            self.balances[frm] = self.balances.get(frm, 0) + amt
+            self.balances[frm] = self.balances.get(frm, 0) + amt - fee
             ch.update(open=False, paid=0)
         self.txids.add(tx["txid"])
 
@@ -338,7 +360,7 @@ class Chain:
         lg = self.ledger
         data = {"height": self.height, "tip": self.blocks[-1].hash(),
                 "ledger": {"balances": lg.balances, "keys": lg.keys, "txids": sorted(lg.txids),
-                           "channels": lg.channels, "height": lg.height}}
+                           "channels": lg.channels, "height": lg.height, "burned": lg.burned}}
         durable.atomic_write(self._ckpt_path(), json.dumps(data).encode("utf-8"), durable.must_sync(True))
 
     def _read_checkpoint(self, blocks):
@@ -352,7 +374,7 @@ class Chain:
             lg = Ledger()
             raw = data["ledger"]
             lg.balances, lg.keys, lg.txids = raw["balances"], raw["keys"], set(raw["txids"])
-            lg.channels, lg.height = raw["channels"], raw["height"]
+            lg.channels, lg.height, lg.burned = raw["channels"], raw["height"], raw.get("burned", 0)
             return h, lg
         except (OSError, ValueError, KeyError, TypeError):
             return None
@@ -435,6 +457,7 @@ class Chain:
         if self.corrupt:
             raise ValueError(f"chain integrity check failed: {self.corrupt}")
         with self.lock:
+            self.pledger.time = time.time()  # pending txs are judged now (fees)
             self.pledger.apply(tx)  # raises ValueError on any broken rule
             self.pending.append(tx)
 
@@ -444,7 +467,7 @@ class Chain:
             self._mine(b)
             self.pending = []
             self.blocks.append(b)
-            self.ledger.height = b.index
+            self.ledger.height, self.ledger.time = b.index, b.timestamp
             for tx in b.txs:
                 self.ledger.apply(tx)
                 self.where[tx["txid"]] = b.index
@@ -478,7 +501,7 @@ class Chain:
             if n < ckpt_h:
                 prev = h
                 continue
-            ledger.height = n
+            ledger.height, ledger.time = n, b.timestamp
             for tx in b.txs:
                 try:
                     ledger.apply(tx)
@@ -526,7 +549,7 @@ if __name__ == "__main__":
     wallets.WALLET_DIR = os.path.join(tmp, "wallets")
     c = Chain(os.path.join(tmp, "chain.json"))
     c.genesis()
-    w1 = wallets.fund(c, "chain-selftest-a", 10)
+    w1 = wallets.fund(c, "chain-selftest-a", 11)  # 10 + a 1 PMX fee
     w2 = wallets.fund(c, "chain-selftest-b", 0)
     tx = c.new_tx(w1.address, w2.address, 10, "test")
     wallets.sign_tx(tx, w1, c)
@@ -535,9 +558,9 @@ if __name__ == "__main__":
     c.mine()
     dt = time.time() - t0
     assert c.valid()[0]
-    assert c.balance(w2.address) == 10
+    assert c.balance(w2.address) == 10 and c.balance(w1.address) == 0 and c.ledger.burned == 1
     reopened = Chain(c.path)
-    assert reopened.balance(w2.address) == 10
+    assert reopened.balance(w2.address) == 10 and reopened.ledger.burned == 1
     print(f"self-test ok: mined block in {dt:.2f}s, balance {c.balance(w2.address)}, "
           f"blocks={len(c.blocks)}; chain reloads and replays clean")
     assert dt < 1.0, "block too slow: lower DIFFICULTY"

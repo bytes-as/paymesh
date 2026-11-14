@@ -95,7 +95,7 @@ class LedgerAttacks(Scratch):
         tx = self.pay(buyer, seller.address, 5)
         with self.assertRaises(ValueError):
             self.c.add_tx(json.loads(json.dumps(tx)))
-        self.assertEqual(self.c.balance(buyer.address), 95)
+        self.assertEqual(self.c.balance(buyer.address), 94)  # 5 + a 1 PMX fee, once
 
     def test_a_block_cannot_mint_more_than_the_faucet_limit(self):
         with self.assertRaises(ValueError):
@@ -125,7 +125,7 @@ class LedgerAttacks(Scratch):
                 self.pay(buyer, seller.address, 1, f"p{k}")
             self.assertTrue(os.path.exists(self.c.path + ".ckpt"))
             again = ch.Chain(self.c.path)  # loads through the checkpoint
-            self.assertEqual(again.balance(buyer.address), 94)
+            self.assertEqual(again.balance(buyer.address), 88)  # 6 x (1 + fee 1)
             # rewrite an early paid tx and re-mine every later block: links and PoW hold again
             with open(self.c.path) as f:
                 lines = f.read().splitlines()
@@ -179,7 +179,7 @@ class LedgerAttacks(Scratch):
             f.write('{"index": 99, "timestamp": 1, "tx')  # power cut mid-append
         again = ch.Chain(self.c.path)
         self.assertEqual(len(again.blocks), len(good.blocks))
-        self.assertEqual(again.balance(buyer.address), 95)
+        self.assertEqual(again.balance(buyer.address), 94)
         again.mine()  # appends after the trimmed line, still loadable
         self.assertEqual(len(ch.Chain(self.c.path).blocks), len(good.blocks) + 1)
 
@@ -220,7 +220,7 @@ class SignatureAttacks(Scratch):
         if forged is not None:
             with self.assertRaises(ValueError, msg="a forged tx built from published secrets was accepted"):
                 self.c.add_tx(forged)
-        self.assertEqual(self.c.balance(victim.address), 92)
+        self.assertEqual(self.c.balance(victim.address), 84)  # 8 x (1 + fee 1)
 
     def test_a_key_never_signs_twice(self):
         w = self.funded("w", 100)

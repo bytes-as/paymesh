@@ -140,6 +140,7 @@ def run(node: str, restart=None) -> list:
     height = lambda: me._node("/health")[1]["chain_blocks"]  # noqa: E731
 
     def raw_channel(expires_in):
+        victim.faucet()  # 50 locked + a 1 PMX fee per channel
         bc = chn.BuyerChannel(50)
         led = victim._ledger()
         t = led.new_tx(victim.wallet.address, seller, 50, "channel:open")
@@ -228,7 +229,7 @@ def run(node: str, restart=None) -> list:
             return 200, me._node(f"/channel/info?id={hb.channel.id}")[1]
         attempt("spend a hub channel at two sellers, then race to refund it", hub_refund,
                 lambda c, b: paid_calls == 3 and b.get("paid") == 13
-                and sorted(b.get("splits", {}).values()) == [3, 10])
+                and sorted(b.get("splits", {}).values()) == [3, 9])  # 10 - the close's fee
 
         # a seller (me) inflating its close with splits beyond what the buyer revealed
         bc2 = chn.BuyerChannel(20)

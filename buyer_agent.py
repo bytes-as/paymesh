@@ -53,8 +53,8 @@ def buy_once(chain_: chain.Chain, wallet: wallets.Wallet, name: str, call: int,
 
     # 2. check wallet (fresh read: the running server mines and persists), pay, submit
     bal = chain.Chain(chain_.path).balance(wallet.address)
-    if bal < amount:
-        log["result"] = f"insufficient funds ({bal} < {amount} PMX)"
+    if bal < amount + 1:  # + the tx fee (1 PMX for a WOTS tx)
+        log["result"] = f"insufficient funds ({bal} < {amount} PMX + fee)"
         log["ok"] = False
         return log
     live = chain.Chain(chain_.path)  # the running server's ledger: whose key signs next

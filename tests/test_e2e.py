@@ -68,7 +68,7 @@ class EndToEnd(unittest.TestCase):
             self.assertTrue(log["ok"], log)
         log = buyer_agent.buy_once(self.chain, w, "e2e", 7, "/premium/history")
         self.assertTrue(log["ok"], log)
-        self.assertEqual(self.chain.balance(w.address), 100 - 6 * 5 - 20)
+        self.assertEqual(self.chain.balance(w.address), 100 - 6 * (5 + 1) - (20 + 1))  # each tx: a 1 PMX fee
         self.assertTrue(self.chain.valid()[0])
 
     def test_2_replayed_tx_and_header_are_refused(self):

@@ -244,7 +244,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(200, c) if c else self._send(404, {"error": "unknown channel"})
             return
         if self.path.startswith("/stats"):
-            self._send(200, STATS.view())
+            with chain_lock:
+                chain_stats = {"fees_burned": chain_inst.ledger.burned, "chain_bytes": os.path.getsize(chain_inst.path),
+                               "blocks": chain_inst.height}
+            self._send(200, dict(STATS.view(), chain=chain_stats))
             return
         if self.path.startswith("/channel/state"):
             # the last tick this seller accepted: a restarted buyer resumes from it

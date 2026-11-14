@@ -162,7 +162,7 @@ class Node(unittest.TestCase):
         self.assertEqual(code, 402)
         self.assertFalse(x402.decode(hdrs[x402.RESPONSE])["success"])
         self.assertIn(x402.REQUIRED, hdrs)  # a fresh challenge to pay again
-        self.assertEqual(c.balance(), 95)
+        self.assertEqual(c.balance(), 94)  # once: 5 + a 1 PMX fee
 
     def test_tx_for_a_spent_or_foreign_challenge_is_not_submitted(self):
         c = Client(self.url, "x402-late")
@@ -193,7 +193,7 @@ class Node(unittest.TestCase):
         # the self-pay (key i, sent only to the node) moved the ledger to key i+1: the seller's
         # copy, signed by key i, can never be mined or extended
         self.assertEqual(self.chain.current_key(c.wallet.address), c.wallet.key_fp(i + 1))
-        self.assertEqual(c.balance(), 100)  # the self-payment moves nothing
+        self.assertEqual(c.balance(), 99)  # the self-payment costs only its 1 PMX fee
         self.assertEqual(c.get("/premium/price")[0], 200)  # and paying works on the next key
 
     def test_malformed_payment_signature_is_400(self):

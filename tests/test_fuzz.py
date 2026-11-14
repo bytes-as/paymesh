@@ -143,7 +143,7 @@ class Fuzz(unittest.TestCase):
         # payment doesn't depend on, e.g. maxTimeoutSeconds, still carries a valid tx)
         self.assertLessEqual(set(codes), {200, 400, 402}, codes)
         self.assertLessEqual(codes.get(200, 0), 1, codes)
-        self.assertEqual(self.c.balance(), balance - 5 * codes.get(200, 0))
+        self.assertEqual(self.c.balance(), balance - (5 + 1) * codes.get(200, 0))  # price + fee
         self.assertEqual(self.c._req("/health")[0], 200)
         self.assertTrue(self.chain.valid()[0])
 

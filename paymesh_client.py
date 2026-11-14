@@ -283,10 +283,10 @@ class Client:
     def _on_chain(self, path, accepted):
         led = self._ledger()
         amount = int(accepted["amount"])
-        if led.balance < amount:
-            raise PaymentError(f"insufficient funds for {amount} PMX")
         tx = led.new_tx(self.wallet.address, accepted["payTo"], amount, accepted["extra"]["memo"])
-        wallets.sign_tx(tx, self.wallet, led)
+        wallets.sign_tx(tx, self.wallet, led)  # sets the fee (1 PMX per started 8 KB)
+        if led.balance < amount + tx["fee"]:  # checked before anyone sees the signature
+            raise PaymentError(f"insufficient funds for {amount} PMX + a {tx['fee']} PMX fee")
         payload = {"transaction": tx}  # the seller settles it: one request instead of two
         if len(x402.encode(payload)) > self.HEADER_LIMIT:
             self._submit(tx)
@@ -306,8 +306,8 @@ class Client:
         led = self._ledger()
         if led.current_key(self.wallet.address) == exposed["next_key"]:
             return  # the exposed tx got mined after all: the key already rotated
-        if led.balance < 1:
-            raise PaymentError("payment refused and the signing key could not be retired (balance 0): "
+        if led.balance < 2:  # 1 PMX to itself + a 1 PMX fee
+            raise PaymentError("payment refused and the signing key could not be retired (balance under 2 PMX): "
                                "fund the wallet before paying again")
         tx = led.new_tx(self.wallet.address, self.wallet.address, 1, "retire-key")
         wallets.sign_tx(tx, self.wallet, led)

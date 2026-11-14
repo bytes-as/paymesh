@@ -159,7 +159,45 @@ def pubkey_fingerprint(pub: list) -> str:
     return sha256_hex("".join(pub).encode())
 
 
-EXTRA_FIELDS = ("kind", "anchor", "ticks", "unit", "expires", "channel", "word", "splits")
+EXTRA_FIELDS = ("kind", "anchor", "ticks", "unit", "expires", "channel", "word", "splits", "fee")
+
+# --- fees: every signed tx burns at least 1 PMX per started FEE_BYTES of its stored size,
+# so chain growth costs (chain.py enforces it for blocks from FEE_EPOCH on) ---
+FEE_BYTES = 8192
+FEE_EPOCH = 1794675780  # 2026-11-14 22:33 IST: blocks stamped earlier carry no fees
+
+
+def tx_size(tx: dict) -> int:
+    """Bytes the tx takes in a block (compact JSON, as the fee is computed)."""
+    return len(json.dumps(tx, sort_keys=True, separators=(",", ":")))
+
+
+def fee_for(tx: dict) -> int:
+    """The least fee this tx (signed, fee field included) must carry."""
+    return max(1, -(-tx_size(tx) // FEE_BYTES))
+
+
+def _placeholder_sig(kind: str) -> dict:
+    h = "0" * 64
+    if kind == "w2":
+        return {"sig": [h] * (WOTS_L + 1)}
+    if kind == "w1":
+        return {"sig": [h] * WOTS_L}
+    return {"sig": [h] * BITS, "pub": [h] * (2 * BITS)}
+
+
+def set_fee(tx: dict, kind: str = "w2") -> int:
+    """Set tx["fee"] to the least fee for its size once signed with a key of `kind`
+    (signatures have a fixed size per scheme, so the estimate is exact)."""
+    fee = 1
+    for _ in range(4):  # the fee's own digits can push the size over a boundary
+        tx["fee"] = fee
+        need = fee_for(dict(tx, next_key="0" * 64, **_placeholder_sig(kind)))
+        if need == fee:
+            break
+        fee = need
+    tx["fee"] = fee
+    return fee
 
 
 def _msg_digest(tx: dict) -> bytes:
@@ -308,6 +346,8 @@ def sign_tx(tx: dict, wallet: Wallet, ledger) -> dict:
         wallet.wots2_from = i + 1  # a WOTS v1 wallet: this key signs as v1, the next is v2
     key, kind = wallet.key(i), wallet.kind(i)
     sk, pub = key[0], key[1]
+    if "fee" not in tx:
+        set_fee(tx, kind)  # callers that net the fee out of an amount (hub splits) set it first
     tx["next_key"] = wallet.key_fp(i + 1)
     d = _msg_digest(tx)
     if kind == "w2":
@@ -437,7 +477,7 @@ if __name__ == "__main__":
         c.add_tx(tx)
         c.mine()
     assert len(keys) == 3, "a key signed twice"
-    assert c.balance(w.address) == 970
+    assert c.balance(w.address) == 967  # 3 x (10 + a 1 PMX fee)
     old = c.all_txs()[-1]
     replay = dict(old, txid="d" * 64)  # same key again, new txid
     try:

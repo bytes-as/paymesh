@@ -65,10 +65,11 @@ class Hub(unittest.TestCase):
         res = c.close_channel()
         self.assertEqual(res["paid_to_seller"], 19)
         cid = [k for k, v in self.chain.ledger.channels.items() if v["buyer"] == c.wallet.address][-1]
-        self.assertEqual(self.chain.ledger.channels[cid]["splits"], {node_seller: 10, shop: 9})
-        self.assertEqual(self.chain.balance(node_seller) - before[node_seller], 10)
+        # the close's 1 PMX fee comes out of the largest share
+        self.assertEqual(self.chain.ledger.channels[cid]["splits"], {node_seller: 9, shop: 9})
+        self.assertEqual(self.chain.balance(node_seller) - before[node_seller], 9)
         self.assertEqual(self.chain.balance(shop) - before[shop], 9)
-        self.assertEqual(c.balance(), 100 - 19)
+        self.assertEqual(c.balance(), 100 - 19 - 1)  # and the open's fee
         self.assertTrue(ch.Chain(self.chain.path).valid()[0])
 
     def test_a_word_pays_one_seller_only(self):
@@ -127,7 +128,7 @@ class HubBook(Scratch):
         tx = again.close_tx(self.c, self.hub, self.bc.id)
         self.c.add_tx(tx)
         self.c.mine()
-        self.assertEqual((self.c.balance(a), self.c.balance(b), self.c.balance(self.buyer.address)), (26, 14, 460))
+        self.assertEqual((self.c.balance(a), self.c.balance(b), self.c.balance(self.buyer.address)), (25, 14, 459))
 
     def test_splits_rules(self):
         book = self.open_hub()
@@ -148,7 +149,7 @@ class HubBook(Scratch):
             self.c.add_tx(stolen)
         self.c.add_tx(book.close_tx(self.c, self.hub, self.bc.id))
         self.c.mine()
-        self.assertEqual(self.c.balance("a1" * 32), 4)
+        self.assertEqual(self.c.balance("a1" * 32), 3)  # 4, the fee out of it
 
     def test_a_hub_channel_word_is_not_taken_without_a_payee(self):
         book = self.open_hub()
