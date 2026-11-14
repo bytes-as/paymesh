@@ -30,6 +30,9 @@ an x402 route; the API's other routes stay closed to it.</p>
 <div id="log"></div>
 <script src="paymesh.js"></script>
 <script>
+  const q = new URLSearchParams(location.search);  // demo.html?api=http://127.0.0.1:8402&shop=http://127.0.0.1:8404
+  if (q.get("api")) document.getElementById("api").value = q.get("api");
+  if (q.get("shop")) document.getElementById("shop").value = q.get("shop");
   const KEY = "paymesh-demo-wallet";
   const saved = localStorage.getItem(KEY);
   const wallet = saved ? Paymesh.Wallet.fromJSON(JSON.parse(saved)) : Paymesh.Wallet.create();

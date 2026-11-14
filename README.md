@@ -13,15 +13,60 @@ is an x402 scheme (`paymesh`) with two ways to pay:
 Python 3 stdlib only. Protocol details: [PROTOCOL.md](PROTOCOL.md). Checked against the
 reference x402 Python SDK: `interop/x402_reference.py`.
 
-## Run it
+## Quickstart (5 minutes)
+
+You need Python 3.10 or newer and nothing else: no packages, no accounts, no real money.
+Commands use `py -3` (Windows); on macOS and Linux write `python3` instead.
+
+**1. Get it and start a node** (a local chain, a paid API on :8402, an explorer on :8403):
 
 ```
+git clone https://github.com/bytes-as/paymesh
 cd paymesh
-py -3 paymesh.py start        # chain + paid API on :8402 + explorer on :8403 (background)
-py -3 buyer_agent.py          # demo: 2 calls paid on-chain, 20 through a channel, settle
-open http://127.0.0.1:8403    # explorer: stats, channels, blocks, txs, balances
-py -3 paymesh.py status | stop
+py -3 paymesh.py start
 ```
+
+Open http://127.0.0.1:8403 to watch blocks, payments and channels arrive.
+
+**2. Start a second seller** in another terminal, in the same folder: an API that runs no
+paymesh code of its own and charges 3 PMX per `/forecast` through the node.
+
+```
+py -3 examples/weather_api.py
+```
+
+**3. Pay from Python**: one call paid on-chain, three through a payment channel, then one
+deposit with the node's hub paying both sellers:
+
+```
+py -3 examples/quickstart.py
+```
+
+**4. Pay from a browser**: serve the demo page on another origin and open it:
+
+```
+py -3 -m http.server 8410 --directory js
+```
+
+Open http://localhost:8410/demo.html, copy the wallet address the page shows, and fund it
+with test coins from a third terminal:
+
+```
+py -3 wallet.py faucet <the address>
+```
+
+Then click the blue buttons (a tx, a channel, the hub paying both sellers). The red ones
+show that a page on another site can't mint coins or read accounts. Tested in Edge; any
+current browser should do (Firefox: open the same URL).
+
+**5. Stop**: Ctrl+C the weather seller and the page server, then `py -3 paymesh.py stop`.
+
+Ports taken? Set `PAYMESH_API_PORT`, `PAYMESH_EXPLORER_PORT` and `WEATHER_PORT` in each
+terminal, and open the page as `demo.html?api=http://127.0.0.1:<api port>&shop=http://127.0.0.1:<weather port>`.
+The chain and wallets live in this folder (`chain.json`, `wallets/`); delete them to start over.
+
+More: `py -3 buyer_agent.py` (an agent that discovers prices, pays and logs each payment),
+`py -3 examples/payout_demo.py` (sellers paid on schedule), `py -3 paymesh.py status`.
 
 ## Use it from an agent
 
@@ -104,7 +149,7 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (131 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (132 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
 `py -3 attacks.py` runs 50 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
