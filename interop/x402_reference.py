@@ -7,7 +7,8 @@ from a separate venv (never installed into paymesh, not run by check.py):
     %TEMP%\\x402ref\\Scripts\\python.exe -m pip install "x402[requests]==2.27.0"
     %TEMP%\\x402ref\\Scripts\\python.exe interop\\x402_reference.py
 
-Last run: x402 2.27.0, REFERENCE INTEROP OK (2026-11-14, with fees).
+Last run: x402 2.27.0, REFERENCE INTEROP OK (2026-11-14, with fees and the facilitator client).
+The facilitator part needs httpx too: pip install "x402[requests,httpx]==2.27.0".
 """
 import json
 import os
@@ -26,7 +27,8 @@ from x402 import x402ClientSync  # noqa: E402
 from x402.http.clients import wrapRequestsWithPayment  # noqa: E402
 from x402.http.utils import (decode_payment_required_header, decode_payment_response_header,  # noqa: E402
                              encode_payment_signature_header)
-from x402.schemas import PaymentPayload  # noqa: E402
+from x402.http import FacilitatorConfig, HTTPFacilitatorClientSync  # noqa: E402
+from x402.schemas import PaymentPayload, PaymentRequirements  # noqa: E402
 
 import wallets  # noqa: E402  (paymesh, stdlib only)
 from paymesh_client import Client  # noqa: E402
@@ -103,8 +105,28 @@ def main():
         r = requests.get(url + "/premium/price", headers={"PAYMENT-SIGNATURE": encode_payment_signature_header(payload)})
         out["channel_replay"] = {"status": r.status_code,
                                  "errorReason": decode_payment_response_header(r.headers["PAYMENT-RESPONSE"]).error_reason}
+        # 4. the node as an x402 facilitator, driven by the reference facilitator client
+        fac = HTTPFacilitatorClientSync(FacilitatorConfig(url=url))
+        sup = fac.get_supported()
+        out["facilitator_supported"] = [(k.scheme, k.network) for k in sup.kinds]
+        shop = "5a" * 32  # a resource server running no paymesh code
+        req = PaymentRequirements(scheme="paymesh", network=sup.kinds[0].network, amount="7", asset="PMX", pay_to=shop,
+                                  max_timeout_seconds=60, extra={"assetTransferMethod": "tx", "paymentFlow": "upfront",
+                                                                 "memo": "shop:order-9:7"})
+        led = pm._ledger()
+        tx = led.new_tx(pm.wallet.address, shop, 7, "shop:order-9:7")
+        wallets.sign_tx(tx, pm.wallet, led)
+        pay = PaymentPayload(x402_version=2, accepted=req, payload={"transaction": tx})
+        v = fac.verify(pay, req)
+        s1 = fac.settle(pay, req)
+        s2 = fac.settle(pay, req)
+        out["facilitator"] = {"verify": [v.is_valid, v.payer == pm.wallet.address],
+                              "settle": [s1.success, s1.transaction == tx["txid"]],
+                              "settle_again": [s2.success, s2.error_reason]}
         print(json.dumps(out, indent=1))
-        ok = (out["paid_by_reference_client"]["status"] == 200 and out["paid_by_reference_client"]["success"]
+        ok = (out["facilitator"]["verify"] == [True, True] and out["facilitator"]["settle"] == [True, True]
+              and out["facilitator"]["settle_again"][0] is False
+              and out["paid_by_reference_client"]["status"] == 200 and out["paid_by_reference_client"]["success"]
               and out["balance_after"] == 94 and  # 100 - 5 - the 1 PMX fee
               out["channel_via_reference_encoder"]["status"] == 200
               and out["channel_replay"]["status"] == 402)

@@ -216,6 +216,35 @@ def run(node: str, restart=None) -> list:
         return 200, me._node(f"/channel/info?id={race.id}")[1]
     attempt("spend a channel, mine blocks fast, refund before the seller settles", refund,
             lambda c, b: served > 0 and b.get("paid") == served * 5)
+    # --- the x402 facilitator (/verify, /settle) that other resource servers delegate to ---
+    net = me._node("/health")[1]["network"]
+    shop_addr = "5a" * 32
+
+    def fac(path, req, payload):
+        return me._node(path, {"x402Version": 2, "paymentRequirements": req,
+                               "paymentPayload": {"x402Version": 2, "accepted": req, "payload": payload}})
+    me.faucet()
+    req7 = x402.requirement(net, shop_addr, 7, "tx", 60, memo="shop:order-1:7")
+    paid7 = signed(me, shop_addr, 7, "shop:order-1:7")
+    fac("/settle", req7, {"transaction": paid7})
+    attempt("facilitator: settle one payment twice (serve twice)", lambda: fac("/settle", req7, {"txid": paid7["txid"]}),
+            lambda c, b: c == 200 and b.get("success") is False)
+    req8 = x402.requirement(net, shop_addr, 7, "tx", 60, memo="shop:order-2:7")
+    attempt("facilitator: pass a payment made for another order",
+            lambda: fac("/settle", req8, {"transaction": signed(me, shop_addr, 7, "shop:order-1:7")}),
+            lambda c, b: c == 200 and b.get("success") is False and b.get("errorReason") == "invalid_paymesh_challenge")
+    ch_ = me.channel  # the next word, peeked: the facilitator must refuse it, so nothing is spent
+    cid, i, w = (ch_.id, ch_.spent + 1, ch_.words[ch_.spent + 1]) if ch_ else (None, None, None)
+    if cid:
+        attempt("facilitator: settle a direct channel's word for another seller",
+                lambda: fac("/settle", x402.requirement(net, shop_addr, 1, "channel", 60),
+                            {"channel": cid, "tick": int(i), "word": w}),
+                lambda c, b: c == 200 and b.get("success") is False)
+    forged = ch.Chain.new_tx(victim.wallet.address, shop_addr, 7, "forged")
+    forged.update(next_key="e" * 64, sig=["ab" * 32] * 68, fee=1)
+    attempt("facilitator: settle a forged tx from a victim", lambda: fac("/settle", x402.requirement(net, shop_addr, 7, "tx", 60),
+                                                                        {"transaction": forged}),
+            lambda c, b: c == 200 and b.get("success") is False)
     attempt("wallet name that escapes the wallet folder", lambda: me._node("/faucet?name=../../evil"), no)
     attempt("malformed JSON body", lambda: raw_post(node, "/tx", b"{"), lambda c, b: c == 400)
     # the same race against a seller running apart from the node (examples/weather_api.py)
