@@ -277,6 +277,40 @@ class Node(unittest.TestCase):
         self.assertIsNone(self.chain.find_tx_by_id(txs[1]["txid"])[0])
         self.assertEqual(c.balance(), 100 - 5 - 1)
 
+    def test_open_a_channel_inside_the_payment(self):
+        """A client that can't post /tx (a browser page) opens its channel in PAYMENT-SIGNATURE."""
+        import channels
+        c = Client(self.url, "x402-opener")
+        c.faucet()
+        _, offers = self.challenge()
+        chan = offers["channel"]
+        self.assertIsInstance(chan["extra"]["height"], int)
+
+        def opening(to=None, kind="channel_open", extra=None):
+            bc = channels.BuyerChannel(20)
+            led = c._ledger()
+            tx = led.new_tx(c.wallet.address, to or chan["payTo"], 20, "channel:open")
+            tx.update(kind=kind, anchor=bc.anchor, ticks=20, unit=1, expires=chan["extra"]["height"] + 100)
+            wallets.sign_tx(tx, c.wallet, led)
+            return bc, dict({"open": tx, "tick": 5, "word": bc.words[5]}, **(extra or {}))
+        bc, payload = opening(to="5a" * 32)  # to someone else: refused before anything is mined
+        code, hdrs, _ = self.raw("/premium/price", {x402.SIGNATURE: sig(chan, payload)})
+        self.assertEqual(code, 402)
+        self.assertEqual(x402.decode(hdrs[x402.RESPONSE])["errorReason"], "invalid_paymesh_payload_recipient_mismatch")
+        self.assertIsNone(self.chain.find_tx_by_id(payload["open"]["txid"])[0])
+        _, payload = opening(extra={"channel": "ab" * 32})
+        self.assertEqual(self.raw("/premium/price", {x402.SIGNATURE: sig(chan, payload)})[0], 400)
+        c._retire_key(payload["open"])  # that key was seen: move past it before signing again
+        bc, payload = opening()
+        code, hdrs, body = self.raw("/premium/price", {x402.SIGNATURE: sig(chan, payload)})
+        self.assertEqual(code, 200, body)
+        cid = payload["open"]["txid"]
+        self.assertEqual(self.chain.ledger.channels[cid]["buyer"], c.wallet.address)
+        code, _, _ = self.raw("/premium/price", {x402.SIGNATURE: sig(chan, payload)})  # the same again: word spent
+        self.assertEqual(code, 402)
+        nxt = {"channel": cid, "tick": 10, "word": bc.words[10]}
+        self.assertEqual(self.raw("/premium/price", {x402.SIGNATURE: sig(chan, nxt)})[0], 200)
+
     def test_malformed_payment_signature_is_400(self):
         code, hdrs, body = self.raw("/premium/price", {x402.SIGNATURE: "not base64!"})
         self.assertEqual(code, 400)

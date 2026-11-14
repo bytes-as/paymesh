@@ -215,7 +215,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ch["error"] = f"payment refused: {refused.get('errorMessage', refused['errorReason'])}"
         host = self.headers.get("Host") or f"{HOST}:{PORT}"
         required = x402.payment_required(f"http://{host}{path}", x402.paymesh_accepts(NETWORK, SELLER.address, price, ch, CHANNEL_UNIT,
-                                                                                     hub=HUB_WALLET.address),
+                                                                                     hub=HUB_WALLET.address,
+                                                                                     height=chain_inst.height),
                                          error=ch["error"] if refused else "PAYMENT-SIGNATURE header is required")
         body = json.dumps(ch).encode()
         self.send_response(402)  # Payment Required

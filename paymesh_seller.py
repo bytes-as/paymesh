@@ -224,7 +224,7 @@ class Paywall:
             body["error"] = f"payment refused: {refused.get('errorMessage', refused['errorReason'])}"
         required = x402.payment_required(url or path, x402.paymesh_accepts(self.node.network, self.wallet.address, price,
                                                                              body, self.unit, node=self.node.url,
-                                                                             hub=self.node.hub),
+                                                                             hub=self.node.hub, height=self.node.height),
                                          error=body["error"] if refused else "PAYMENT-SIGNATURE header is required")
         return False, 402, body, out + [(x402.REQUIRED, x402.encode(required))]
 

@@ -111,14 +111,16 @@ def requirement(network: str, pay_to: str, amount: int, method: str, timeout: in
 
 
 def paymesh_accepts(network: str, pay_to: str, price: int, challenge: dict, unit: int, node: str = "",
-                    hub: str = "") -> list:
+                    hub: str = "", height: int | None = None) -> list:
     """The two ways to pay a route: a tx carrying this challenge's memo, or a channel tick
-    (from a channel to this seller, or to `hub`, whose channels any seller takes)."""
+    (from a channel to this seller, or to `hub`, whose channels any seller takes). `height`
+    (the chain's) lets a client that can't ask the node (a browser page) set a new channel's
+    expiry when it opens one inside its payment ({"open": channel_open tx, "tick", "word"})."""
     t = challenge["expires_in"]
     on_chain = requirement(network, pay_to, price, "tx", t, memo=challenge["memo"], nonce=challenge["nonce"],
                            **({"node": node} if node else {}))
     return [on_chain, requirement(network, pay_to, price, "channel", t, unit=unit, terms="/channel/terms",
-                                  **({"hub": hub} if hub else {}))]
+                                  **({"hub": hub} if hub else {}), **({"height": height} if height is not None else {}))]
 
 
 def payment_required(url: str, accepts: list, error: str = "PAYMENT-SIGNATURE header is required",
@@ -165,9 +167,17 @@ def parse(value: str, network: str, pay_to: str, price: int) -> tuple[str, dict]
     if extra.get("paymentFlow", FLOW) != FLOW:
         raise Invalid("invalid_payment_requirements", f"paymentFlow must be {FLOW!r}")
     if method == "channel":
+        op = payload.get("open")
+        if op is not None:  # open a channel to this seller and pay its first ticks, in one request
+            if not isinstance(op, dict) or op.get("kind") != "channel_open" or not isinstance(op.get("txid"), str) \
+                    or not _HEX64.match(op["txid"]) or set(payload) != {"open", "tick", "word"}:
+                raise Invalid("invalid_payload", "an opening payload is {open: <signed channel_open tx>, tick, word}")
+            if op.get("to_wallet") != pay_to:
+                raise Invalid("invalid_paymesh_payload_recipient_mismatch", "the channel_open pays someone else", 402)
+            payload = dict(payload, channel=op["txid"])
         cid, tick, word = payload.get("channel"), payload.get("tick"), payload.get("word")
         if not (isinstance(cid, str) and _HEX64.match(cid) and type(tick) is int and tick > 0
-                and isinstance(word, str) and _HEX64.match(word)) or len(payload) != 3:
+                and isinstance(word, str) and _HEX64.match(word)) or len(payload) != (4 if op is not None else 3):
             raise Invalid("invalid_payload", "channel payload is {channel: 64 hex, tick: int > 0, word: 64 hex}")
         return method, payload
     if set(payload) == {"txid"} and isinstance(payload["txid"], str) and _HEX64.match(payload["txid"]):
@@ -197,6 +207,18 @@ def settle(value: str, *, network: str, pay_to: str, price: int, path: str, chai
     except Invalid as e:
         return e.status, settlement(network, False, reason=e.reason, message=str(e)), None
     if method == "channel":
+        if "open" in payload:  # mine the channel_open first (only on a 200 for it is the word taken)
+            op = payload["open"]
+            try:
+                submit(op)
+            except Pending as e:
+                return 402, settlement(network, False, op["txid"], reason="settlement_pending", message=str(e)), method
+            except ValueError as e:
+                if "txid already used" not in str(e):
+                    return 402, settlement(network, False, reason="invalid_transaction_state", message=str(e)), method
+                if chain_.find_tx_by_id(op["txid"])[0] is None:
+                    return 402, settlement(network, False, op["txid"], reason="settlement_pending",
+                                           message=PENDING_MSG), method
         ok, why = book.accept(chain_, f"{payload['channel']} {payload['tick']} {payload['word']}", price)
         if not ok:
             return 402, settlement(network, False, reason="invalid_paymesh_channel_payment", message=why), method
