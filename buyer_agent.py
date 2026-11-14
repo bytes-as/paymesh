@@ -1,6 +1,5 @@
 """paymesh buyer agent: discovers 402, pays, retries, logs each payment.
 
-buyer_broke.py reuses this module with an empty wallet: it must be refused.
 Stdlib only. Example:
     py -3 buyer_agent.py
 """

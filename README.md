@@ -10,8 +10,8 @@ is an x402 scheme (`paymesh`) with two ways to pay:
 * **payment channel**: one deposit on-chain, then every call carries the next
   word of a hash chain, checked with a few hashes (0.4 ms), settled in one block.
 
-Python 3 stdlib only; CI (`.github/workflows/check.yml`) runs `check.py` on Ubuntu and Windows
-with Python 3.10 and 3.13. Protocol details: [PROTOCOL.md](PROTOCOL.md). Checked against the
+Python 3 stdlib only. CI (`.github/workflows/check.yml`) is set up to run `check.py` on Ubuntu
+and Windows with Python 3.10 and 3.13 on every push; it has not run yet. Protocol details: [PROTOCOL.md](PROTOCOL.md). Checked against the
 reference x402 Python SDK: `interop/x402_reference.py`.
 
 ## Quickstart (5 minutes)

@@ -292,9 +292,9 @@ when `chain.json` is loaded:
 * `channel_refund`: from the buyer to itself for the deposit minus what was paid out, from the `expires` height on; the first opens the refund window (1b.7), the second, after `refund_at`, pays the deposit back;
 * the faucet (address `0` x 64) mints at most 100 PMX per tx, only through `GET /faucet`.
 * a tx carries only its kind's fields (above); anything else is refused.
-* `fee` (signed, every kind but the faucet): see section 6.
+* `fee` (signed, every kind but the faucet): see section 4.
 
-## 6. Fees and spam
+## 4. Fees and spam
 
 From `FEE_EPOCH` (2026-11-14 22:33 IST, block timestamps) every signed tx
 carries `fee`, a whole number of PMX of at least `ceil(size / 8192)`, at least
@@ -321,7 +321,7 @@ bounds a spammer: at most ~200 PMX/s per IP, so at most ~1 MB/s of chain per
 IP. The fee makes every byte cost faucet quota rather than nothing. With a
 scarce token, the fee alone would price chain growth.
 
-## 4. Signatures and keys
+## 5. Signatures and keys
 
 Each wallet is a chain of **one-time keys** derived from a 32-byte seed. The
 wallet address is the fingerprint of key 0. Every signed tx names the
@@ -355,7 +355,7 @@ the wallet signs only with v2 (wallet file format 5 records `wots2_from`). The
 ledger keeps verifying all three schemes, so every block written before keeps
 replaying.
 
-## 5. Chain file
+## 6. Chain file
 
 `chain.json` is a `{"format": 3}` line followed by one block per line
 (append-only). A block is `{"index", "timestamp", "txs", "prev_hash", "nonce",
