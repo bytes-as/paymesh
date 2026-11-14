@@ -132,9 +132,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         why = x402.cross_site(self.headers.get, self.headers.get("Host") or "")
         if why is None:
             return False
-        self.close_connection = self.command == "POST"  # an unread body must not become the next request
+        if self.command == "POST":
+            self._drain()
         self._send(403, {"error": f"cross-site request refused: {why}"})
         return True
+
+    def _drain(self):
+        """Read and drop a refused request's body (up to MAX_TX_BYTES) before answering. An
+        unread body must not become the next request, and closing a socket with unread input
+        makes Windows reset it: the client could lose the answer. A larger body: close."""
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if 0 <= n <= MAX_TX_BYTES:
+            if n:
+                self.rfile.read(n)
+        else:
+            self.close_connection = True
 
     def do_OPTIONS(self):
         """CORS preflight: answered for the paid x402 routes, refused (no CORS headers) elsewhere."""
@@ -424,6 +439,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         wait = LIMITS.allow(self.client_address[0], kind)
         if not wait:
             return False
+        if self.command == "POST":
+            self._drain()  # before the answer: see _drain
         body = json.dumps({"error": "too many requests", "kind": kind, "retry_after_s": round(wait, 2)}).encode()
         self.send_response(429)
         self.send_header("Content-Type", "application/json")
@@ -431,7 +448,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-        self.close_connection = self.command == "POST"  # an unread body must not become the next request
         return True
 
     def _send(self, code: int, obj: dict):

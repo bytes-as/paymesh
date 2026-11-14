@@ -277,6 +277,12 @@ class Paywall:
                 why = x402.cross_site(lambda k: environ.get("HTTP_" + k.upper().replace("-", "_")),
                                       environ.get("HTTP_HOST", ""))
                 if why:
+                    try:  # read a small body first: closing on unread input resets the connection
+                        n = int(environ.get("CONTENT_LENGTH") or 0)
+                        if 0 < n <= 4096:
+                            environ["wsgi.input"].read(n)
+                    except (ValueError, OSError):
+                        pass
                     return _json(start_response, 403, {"error": f"cross-site request refused: {why}"})
             headers = {"X-Channel": environ.get("HTTP_X_CHANNEL"), "X-Payment": environ.get("HTTP_X_PAYMENT"),
                        x402.SIGNATURE: environ.get("HTTP_PAYMENT_SIGNATURE")}

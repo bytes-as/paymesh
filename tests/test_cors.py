@@ -55,7 +55,7 @@ class CorsNode(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.paywall.stop.set()
+        cls.paywall.close()
         cls.httpd.shutdown()
         cls.httpd.server_close()
         cls.api.settler_stop.set()
@@ -131,6 +131,16 @@ class CorsNode(unittest.TestCase):
         self.assertEqual(raw(self.port, "GET", f"/account?address={addr}", same)[0], 200)
         self.assertEqual(raw(self.port, "GET", f"/faucet?address={addr}", {"Sec-Fetch-Site": "none"})[0], 200)  # typed URL
         self.assertEqual(self.chain.balance(addr), 200)
+
+    def test_a_refused_post_always_gets_its_answer(self):
+        """Refusing before reading the body used to close the socket with unread input; Windows
+        then resets the connection and the client lost the 403 (a flaky test, 1 run in 3)."""
+        body = json.dumps({"pad": "x" * 2000})
+        for n in range(300):
+            port, path = ((self.port, "/tx"), (self.port, "/channel/close"), (self.sport, "/channel/close"))[n % 3]
+            code, _, data = raw(port, "POST", path, dict(CROSS, **{"Content-Type": "text/plain"}), body)
+            self.assertEqual(code, 403, (n, path))
+            self.assertIn(b"cross-site", data)
 
     def test_cors_does_not_leak_onto_the_next_keep_alive_response(self):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
