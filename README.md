@@ -10,7 +10,8 @@ is an x402 scheme (`paymesh`) with two ways to pay:
 * **payment channel**: one deposit on-chain, then every call carries the next
   word of a hash chain, checked with a few hashes (0.4 ms), settled in one block.
 
-Python 3 stdlib only. Protocol details: [PROTOCOL.md](PROTOCOL.md). Checked against the
+Python 3 stdlib only; CI (`.github/workflows/check.yml`) runs `check.py` on Ubuntu and Windows
+with Python 3.10 and 3.13. Protocol details: [PROTOCOL.md](PROTOCOL.md). Checked against the
 reference x402 Python SDK: `interop/x402_reference.py`.
 
 ## Quickstart (5 minutes)
@@ -63,6 +64,8 @@ and fund that one. Tested in Edge; any
 current browser should do (Firefox: open the same URL).
 
 **5. Stop**: Ctrl+C the weather seller and the page server, then `py -3 paymesh.py stop`.
+`start` detaches the node on every OS (Linux/macOS: its own session, so closing the terminal
+doesn't stop it) and keeps its pid in `paymesh.pid` next to the chain; `stop` ends it cleanly.
 
 Ports taken? Set `PAYMESH_API_PORT`, `PAYMESH_EXPLORER_PORT` and `WEATHER_PORT` in each
 terminal, and open the page as `demo.html?api=http://127.0.0.1:<api port>&shop=http://127.0.0.1:<weather port>`.
@@ -152,7 +155,7 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (133 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (135 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
 `py -3 attacks.py` runs 50 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.

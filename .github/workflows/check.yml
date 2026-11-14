@@ -1,0 +1,36 @@
+# The gate every commit passes locally (py -3 check.py), on the OSes and Pythons we can't run
+# here: self-tests, the unit tests (Node.js runs the JS cross-tests), the attack showcase and a
+# short benchmark. No dependencies to install: paymesh is Python 3 stdlib only.
+name: check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    env:
+      PYTHONWARNINGS: error::ResourceWarning  # no socket or file left to the garbage collector
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4  # tests/test_js_client.py runs js/paymesh.js under Node.js
+        with:
+          node-version: "20"
+      - name: check.py
+        run: python check.py
