@@ -74,6 +74,14 @@ class LedgerAttacks(Scratch):
             self.c.add_tx(tx)
         self.assertEqual(self.c.balance(victim.address), 100)
 
+    def test_junk_fields_cannot_be_stapled_onto_a_signed_tx(self):
+        w = self.funded("w", 10)
+        tx = self.c.new_tx(w.address, "a" * 64, 1, "m")
+        wallets.sign_tx(tx, w, self.c)
+        with self.assertRaises(ValueError):
+            self.c.add_tx(dict(tx, junk="x" * 100_000))
+        self.c.add_tx(tx)  # the clean original still goes through
+
     def test_zero_and_fractional_amounts_are_refused(self):
         w = self.funded("w", 10)
         for amt in (0, 1.5, True):

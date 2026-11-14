@@ -32,6 +32,14 @@ MAX_MEMO = 256
 FAUCET_MAX = 100  # PMX per faucet mint
 CKPT_EVERY = 500  # blocks between ledger checkpoints (chain.json.ckpt)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+# the fields each kind of tx may carry: anything else is refused, so nobody can
+# staple unsigned junk onto someone else's signed tx
+_BASE = {"from_wallet", "to_wallet", "amount", "memo", "txid"}
+_SIGNED = _BASE | {"next_key", "sig", "pub", "kind"}
+FIELDS = {"faucet": _BASE | {"kind"}, "pay": _SIGNED,
+          "channel_open": _SIGNED | {"anchor", "ticks", "unit", "expires"},
+          "channel_close": _SIGNED | {"channel", "ticks", "word"},
+          "channel_refund": _SIGNED | {"channel"}}
 FORMAT = 3  # chain.json: a {"format": 3} line, then one block per line (append-only)
 
 
@@ -115,7 +123,8 @@ class Ledger:
             if self.balances.get(frm, 0) < amt:
                 raise ValueError(f"insufficient funds: {self.balances.get(frm, 0)} PMX, needs {amt}")
             return
-        ch = self.channels.get(tx.get("channel"))
+        cid = tx.get("channel")
+        ch = self.channels.get(cid) if isinstance(cid, str) else None
         if ch is None:
             raise ValueError("unknown channel")
         if not ch["open"]:
@@ -160,6 +169,14 @@ class Ledger:
         if to == FAUCET:
             raise ValueError("cannot pay the faucet address")
         kind = tx.get("kind", "pay")
+        if not isinstance(kind, str):
+            raise ValueError("kind must be text")
+        allowed = FIELDS["faucet" if frm == FAUCET else kind] if (frm == FAUCET or kind in FIELDS) else None
+        if allowed is None or (frm == FAUCET and kind != "pay"):
+            raise ValueError(f"unknown tx kind {kind!r}")
+        extra = set(tx) - allowed
+        if extra:
+            raise ValueError(f"unknown tx fields: {', '.join(sorted(map(str, extra)))[:100]}")
         if kind != "pay":
             return self._check_channel(tx, kind)
         if frm == FAUCET:

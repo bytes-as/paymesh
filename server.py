@@ -179,6 +179,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except (ValueError, UnicodeDecodeError) as e:  # JSONDecodeError is a ValueError
                 self._send(400, {"error": f"tx rejected: {e}"})
                 return
+            except Exception as e:  # noqa: BLE001 - a malformed tx must get 400, never kill the request
+                print(f"[api] unexpected {type(e).__name__} on /tx: {e}")
+                self._send(400, {"error": "tx rejected: malformed"})
+                return
             self._send(200, {"accepted": True, "txid": tx["txid"], "block": blk.index})
             print(f"[api] tx {tx['txid'][:16]}.. mined in block {blk.index}")
             return
