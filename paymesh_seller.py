@@ -301,7 +301,7 @@ class Paywall:
                     n = int(environ.get("CONTENT_LENGTH") or 0)
                     if not 0 < n <= 4096:
                         raise ValueError("body must be 1..4096 bytes")
-                    cid = str(json.loads(environ["wsgi.input"].read(n)).get("channel", ""))
+                    cid = str(x402.loads(environ["wsgi.input"].read(n)).get("channel", ""))
                     return _json(start_response, 200, self.settle(cid))
                 except (ValueError, AttributeError) as e:
                     return _json(start_response, 400, {"error": f"close refused: {e}"})

@@ -84,6 +84,16 @@ def network_id(genesis_hash: str) -> str:
     return f"{SCHEME}:{genesis_hash[:32]}"
 
 
+def loads(raw):
+    """json.loads for untrusted input: nesting deep enough to overflow the parser's stack
+    (about 5,000 to 17,000 brackets, depending on the platform) raises RecursionError, which
+    is not a ValueError; here it is one, so callers answer 400 instead of dropping the request."""
+    try:
+        return json.loads(raw)
+    except RecursionError:
+        raise ValueError("JSON nested too deeply") from None
+
+
 def encode(obj: dict) -> str:
     return base64.b64encode(json.dumps(obj, separators=(",", ":")).encode()).decode("ascii")
 
@@ -95,7 +105,7 @@ def decode(value: str) -> dict:
     if len(value) > MAX_HEADER:
         raise Invalid("invalid_payload", f"header over {MAX_HEADER} chars")
     try:
-        obj = json.loads(base64.b64decode(value, validate=True).decode("utf-8"))
+        obj = loads(base64.b64decode(value, validate=True).decode("utf-8"))
     except (binascii.Error, ValueError, UnicodeDecodeError):
         raise Invalid("invalid_payload", "header is not base64 of a JSON object") from None
     if not isinstance(obj, dict):

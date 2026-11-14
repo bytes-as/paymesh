@@ -116,6 +116,7 @@ NETWORK = ""  # x402 network id, set by start() from the genesis hash
 
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "paymesh/0.3"
+    disable_nagle_algorithm = True  # TCP_NODELAY: on Linux, headers then body would wait ~40 ms for an ACK
     protocol_version = "HTTP/1.1"  # keep-alive: every response carries Content-Length
 
     def log_message(self, fmt, *args):
@@ -365,7 +366,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not 0 < length <= MAX_TX_BYTES:
                     self.close_connection = True  # the unread body must not become the next request
                     raise ValueError(f"body must be 1..{MAX_TX_BYTES} bytes")
-                tx = json.loads(self.rfile.read(length).decode())
+                tx = x402.loads(self.rfile.read(length).decode())
                 blk = submit_and_wait(tx)
             except (ValueError, UnicodeDecodeError) as e:  # JSONDecodeError is a ValueError
                 self._send(400, {"error": f"tx rejected: {e}"})
@@ -383,7 +384,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not 0 < length <= MAX_TX_BYTES:
                     self.close_connection = True
                     raise ValueError(f"body must be 1..{MAX_TX_BYTES} bytes")
-                body = json.loads(self.rfile.read(length).decode())
+                body = x402.loads(self.rfile.read(length).decode())
             except (ValueError, UnicodeDecodeError) as e:
                 self._send(400, {"error": f"facilitator request refused: {e}"})
                 return
@@ -407,7 +408,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not 0 < length <= 4096:
                     self.close_connection = True
                     raise ValueError("body must be 1..4096 bytes")
-                q = json.loads(self.rfile.read(length).decode())
+                q = x402.loads(self.rfile.read(length).decode())
                 if not isinstance(q, dict):
                     raise ValueError("body must be an object")
                 cid, tick, word, payee, price = (q.get(k) for k in ("channel", "tick", "word", "seller", "price"))
@@ -431,7 +432,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not 0 < length <= 4096:
                     self.close_connection = True
                     raise ValueError("body must be 1..4096 bytes")
-                cid = str(json.loads(self.rfile.read(length).decode()).get("channel", ""))
+                cid = str(x402.loads(self.rfile.read(length).decode()).get("channel", ""))
                 blk, tx = settle(cid)
             except (ValueError, UnicodeDecodeError, AttributeError) as e:
                 self._send(400, {"error": f"close refused: {e}"})

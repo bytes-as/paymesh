@@ -1,5 +1,6 @@
 """Fuzzing the HTTP surface: mutated txs and payment headers never crash the server
 or slip through. Seeded, so a failure reproduces."""
+import base64
 import json
 import os
 import random
@@ -12,6 +13,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 import chain as ch  # noqa: E402
 import server  # noqa: E402
+import paymesh_x402  # noqa: E402
 import wallets  # noqa: E402
 from paymesh_client import Client  # noqa: E402
 from test_e2e import free_port  # noqa: E402
@@ -173,6 +175,18 @@ class Fuzz(unittest.TestCase):
             self.assertEqual(status, 402, repr(d))
             sig = x402.encode({"x402Version": 2, "accepted": acc, "payload": {"channel": cid, "tick": d, "word": word}})
             self.assertEqual(self.c._req("/premium/price", headers={x402.SIGNATURE: sig})[0], 400, repr(d))
+        self.assertEqual(self.c._req("/health")[0], 200)
+
+    def test_deeply_nested_json_is_400_everywhere(self):
+        """Nesting deep enough to overflow json's stack raises RecursionError, not ValueError:
+        it used to drop the request without an answer (CI: Windows and Linux, ~5,000 brackets
+        there, ~17,000 here). Every POST body and the PAYMENT-SIGNATURE header answer 400."""
+        for path, size in (("/tx", 150_000), ("/settle", 150_000), ("/verify", 150_000),  # bodies up to 200 KB
+                           ("/hub/claim", 4_000), ("/channel/close", 4_000)):  # bodies up to 4 KB
+            self.assertEqual(self._raw(path, b"[" * size)[0], 400, path)
+        header = base64.b64encode(b"[" * 30_000).decode()  # 40 KB, under the 48 KB header limit
+        code, body = self.c._req("/premium/price", headers={paymesh_x402.SIGNATURE: header})
+        self.assertEqual(code, 400, body)
         self.assertEqual(self.c._req("/health")[0], 200)
 
     def _raw(self, path, body):

@@ -301,6 +301,12 @@ def run(node: str, restart=None) -> list:
             lambda: from_evil_page("OPTIONS", "/tx", **{"Access-Control-Request-Method": "POST",
                                                        "Access-Control-Request-Headers": "content-type"}),
             lambda c, b: c == 403 and b["acao"] is None)
+    import base64  # nesting deep enough to overflow json's stack raises RecursionError, not ValueError
+    attempt("deeply nested JSON body (parser stack overflow)",
+            lambda: raw_post(node, "/tx", b"[" * 200_000), lambda c, b: c == 400)
+    attempt("deeply nested JSON in PAYMENT-SIGNATURE",
+            lambda: me._req("/premium/price", headers={x402.SIGNATURE: base64.b64encode(b"[" * 30_000).decode()}),
+            lambda c, b: c == 400)
     attempt("wallet name that escapes the wallet folder", lambda: me._node("/faucet?name=../../evil"), no)
     attempt("malformed JSON body", lambda: raw_post(node, "/tx", b"{"), lambda c, b: c == 400)
     # the same race against a seller running apart from the node (examples/weather_api.py)
