@@ -1,6 +1,7 @@
 """paymesh wallet: a command line for people (agents use paymesh_client.py).
 
-    py -3 wallet.py new <name>                 create a wallet (keys stay in wallets/)
+    py -3 wallet.py new <name> [--encrypt]     create a wallet (keys stay in wallets/);
+                                               --encrypt seals its seed with PAYMESH_PASSPHRASE
     py -3 wallet.py address <name>
     py -3 wallet.py balance <name>
     py -3 wallet.py faucet <name>              demo money: +100 PMX
@@ -46,8 +47,13 @@ def main(argv):
         return 0
     cmd, name = argv[0], argv[1]
     if cmd == "new":
-        w = wallets.create(name)
-        print(json.dumps({"wallet": name, "address": w.address}))
+        pw = None
+        if "--encrypt" in argv[2:]:
+            pw = os.environ.get("PAYMESH_PASSPHRASE")
+            if not pw:
+                raise SystemExit("--encrypt needs the passphrase in PAYMESH_PASSPHRASE")
+        w = wallets.create(name, pw)
+        print(json.dumps({"wallet": name, "address": w.address, "encrypted": bool(pw)}))
         return 0
     c = _client(name)
     if cmd == "address":
@@ -95,6 +101,6 @@ def main(argv):
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except (PaymentError, OSError, ValueError) as e:
+    except (PaymentError, OSError, ValueError) as e:  # PermissionError is an OSError
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)

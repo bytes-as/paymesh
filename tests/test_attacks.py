@@ -267,6 +267,41 @@ class PaywallAttacks(Scratch):
             paywall.MAX_OPEN = old
 
 
+class WalletAtRest(Scratch):
+    def test_an_encrypted_seed_needs_the_passphrase(self):
+        w = wallets.create("vault", "correct horse battery staple")
+        with open(w.path) as f:
+            raw = json.load(f)
+        self.assertNotIn("seed", raw)
+        self.assertNotIn(w.seed.hex(), json.dumps(raw))
+        old = os.environ.pop("PAYMESH_PASSPHRASE", None)
+        try:
+            with self.assertRaises(PermissionError):
+                wallets.load("vault")
+            os.environ["PAYMESH_PASSPHRASE"] = "wrong"
+            with self.assertRaises(PermissionError):
+                wallets.load("vault")
+            os.environ["PAYMESH_PASSPHRASE"] = "correct horse battery staple"
+            back = wallets.load("vault")
+            self.assertEqual(back.address, w.address)
+            self.c.add_tx(self.c.new_tx(ch.FAUCET, back.address, 10, "faucet:vault"))
+            self.c.mine()
+            tx = self.c.new_tx(back.address, "a" * 64, 1, "m")
+            wallets.sign_tx(tx, back, self.c)  # saves next_index: must stay sealed
+            self.c.add_tx(tx)
+            with open(w.path) as f:
+                self.assertNotIn("seed", json.load(f))
+            raw["seed_enc"]["ct"] = "00" * 32  # tampered file
+            with open(w.path, "w") as f:
+                json.dump(raw, f)
+            with self.assertRaises(PermissionError):
+                wallets.load("vault")
+        finally:
+            os.environ.pop("PAYMESH_PASSPHRASE", None)
+            if old is not None:
+                os.environ["PAYMESH_PASSPHRASE"] = old
+
+
 class WalletNameAttacks(Scratch):
     def test_wallet_names_cannot_escape_the_wallet_dir(self):
         for bad in ("../evil", "..\\evil", "a/b", "", "x" * 100, "con."):

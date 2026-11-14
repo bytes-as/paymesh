@@ -66,8 +66,9 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (39 tests: attacks, channels, HTTP end
-to end, client SDK, a separate seller API, seeded fuzzing).
+`py -3 -m unittest discover -s tests` (40 tests: attacks, channels, HTTP end
+to end, client SDK, a separate seller API, seeded fuzzing, wallets at rest).
+`py -3 attacks.py` runs 14 attacks against a scratch node and shows each refused.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
   extended into a forgery; a spent key never verifies again.
@@ -97,7 +98,9 @@ to end, client SDK, a separate seller API, seeded fuzzing).
 
 * PMX is play money: the faucet mints it for anyone, and one server is the
   only miner, so there's no consensus and no fees.
-* Wallet files hold their seed in plain text under `wallets/` (kept out of git).
+* Wallet files hold their seed in plain text under `wallets/` (kept out of git)
+  unless created with `wallet.py new <name> --encrypt` (scrypt + HMAC-SHA256,
+  passphrase from `PAYMESH_PASSPHRASE`).
 * Rate limits are per client IP, so clients behind one address share them.
 * The payment format is x402-style, not wire-compatible with the x402 spec.
 

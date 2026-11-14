@@ -17,6 +17,7 @@ index. Run directly for a self-test:
     py -3 wallets.py
 """
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -38,6 +39,40 @@ MAX_KEY_SEARCH = 20_000
 
 def sha256_hex(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+# --- seeds at rest: scrypt -> (enc key, mac key); HMAC-SHA256 counter keystream; encrypt-then-MAC ---
+SCRYPT = {"n": 2**14, "r": 8, "p": 1}
+
+
+def _keys(passphrase: str, salt: bytes, kdf: dict):
+    k = hashlib.scrypt(passphrase.encode(), salt=salt, n=kdf["n"], r=kdf["r"], p=kdf["p"], dklen=64, maxmem=2**26)
+    return k[:32], k[32:]
+
+
+def _stream(key: bytes, nonce: bytes, n: int) -> bytes:
+    out = b""
+    for ctr in range((n + 31) // 32):
+        out += hmac.new(key, nonce + ctr.to_bytes(8, "big"), hashlib.sha256).digest()
+    return out[:n]
+
+
+def seal_seed(seed: bytes, passphrase: str) -> dict:
+    salt, nonce = secrets.token_bytes(16), secrets.token_bytes(16)
+    ek, mk = _keys(passphrase, salt, SCRYPT)
+    ct = bytes(a ^ b for a, b in zip(seed, _stream(ek, nonce, len(seed))))
+    mac = hmac.new(mk, salt + nonce + ct, hashlib.sha256).hexdigest()
+    return {"kdf": "scrypt", **SCRYPT, "salt": salt.hex(), "nonce": nonce.hex(), "ct": ct.hex(), "mac": mac}
+
+
+def open_seed(box: dict, passphrase: str | None) -> bytes:
+    if not passphrase:
+        raise PermissionError("this wallet is encrypted: set PAYMESH_PASSPHRASE")
+    salt, nonce, ct = bytes.fromhex(box["salt"]), bytes.fromhex(box["nonce"]), bytes.fromhex(box["ct"])
+    ek, mk = _keys(passphrase, salt, box)
+    if not hmac.compare_digest(hmac.new(mk, salt + nonce + ct, hashlib.sha256).hexdigest(), box["mac"]):
+        raise PermissionError("wrong passphrase (or the wallet file was changed)")
+    return bytes(a ^ b for a, b in zip(ct, _stream(ek, nonce, len(ct))))
 
 
 def check_name(name) -> str:
@@ -110,6 +145,7 @@ class Wallet:
         self.seed = seed
         self.next_index = next_index
         self.wots_from = wots_from
+        self.sealed: dict | None = None  # the encrypted seed, rewritten as is on save
         self._cache: dict = {}
         self.address = self.key_fp(0)
 
@@ -146,8 +182,13 @@ class Wallet:
         return os.path.join(WALLET_DIR, f"{self.name}.wallet.json")
 
     def to_dict(self):
-        return {"name": self.name, "v": VERSION, "address": self.address,
-                "seed": self.seed.hex(), "next_index": self.next_index, "wots_from": self.wots_from}
+        d = {"name": self.name, "v": VERSION, "address": self.address,
+             "next_index": self.next_index, "wots_from": self.wots_from}
+        if self.sealed:
+            d["seed_enc"] = self.sealed
+        else:
+            d["seed"] = self.seed.hex()
+        return d
 
     def save(self):
         os.makedirs(WALLET_DIR, exist_ok=True)
@@ -161,11 +202,13 @@ def _path(name: str) -> str:
     return os.path.join(WALLET_DIR, f"{check_name(name)}.wallet.json")
 
 
-def create(name: str) -> Wallet:
-    """Create and persist a fresh wallet. Fails if the name is taken."""
+def create(name: str, passphrase: str | None = None) -> Wallet:
+    """Create and persist a fresh wallet (its seed encrypted when a passphrase is given)."""
     if os.path.exists(_path(name)):
         raise FileExistsError(f"wallet '{name}' exists")
     w = Wallet(name, secrets.token_bytes(32))
+    if passphrase:
+        w.sealed = seal_seed(w.seed, passphrase)
     w.save()
     return w
 
@@ -180,7 +223,15 @@ def load(name: str) -> Wallet:
         raise LookupError(f"wallet '{name}': old format v{raw.get('v')}")
     # v3 wallets were all-Lamport: wots_from None until their next signature
     wf = raw.get("wots_from") if raw.get("v") == VERSION else None
-    return Wallet(raw["name"], bytes.fromhex(raw["seed"]), int(raw.get("next_index", 0)), wf)
+    if "seed_enc" in raw:
+        seed = open_seed(raw["seed_enc"], os.environ.get("PAYMESH_PASSPHRASE"))
+    else:
+        seed = bytes.fromhex(raw["seed"])
+    w = Wallet(raw["name"], seed, int(raw.get("next_index", 0)), wf)
+    w.sealed = raw.get("seed_enc")
+    if w.address != raw.get("address", w.address):
+        raise PermissionError(f"wallet '{name}': the seed does not match the address")
+    return w
 
 
 def load_or_create(name: str) -> Wallet:
