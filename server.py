@@ -65,6 +65,39 @@ class Stats:
 
 
 STATS = Stats()
+
+
+class RateLimit:
+    """Token buckets per client address and kind of request. Over the limit: 429."""
+
+    def __init__(self, limits: dict):
+        self.limits = limits  # kind -> (burst, refill per second)
+        self.buckets: dict = {}
+        self.lock = threading.Lock()
+
+    def allow(self, who: str, kind: str) -> float:
+        """0 if allowed now, else seconds until a token is free."""
+        burst, rate = self.limits[kind]
+        now = time.monotonic()
+        with self.lock:
+            if len(self.buckets) > 10_000:
+                self.buckets.clear()
+            tokens, last = self.buckets.get((who, kind), (burst, now))
+            tokens = min(burst, tokens + (now - last) * rate)
+            if tokens < 1:
+                self.buckets[(who, kind)] = (tokens, now)
+                return (1 - tokens) / rate
+            self.buckets[(who, kind)] = (tokens - 1, now)
+            return 0.0
+
+
+def _limit(kind, burst, rate):
+    env = lambda k, d: float(os.environ.get(f"PAYMESH_{kind.upper()}_{k}", d))  # noqa: E731
+    return env("BURST", burst), env("PER_S", rate)
+
+
+LIMITS = RateLimit({"faucet": _limit("faucet", 200, 2), "tx": _limit("tx", 2000, 500),
+                    "challenge": _limit("challenge", 5000, 1000)})
 chain_inst: chain.Chain
 SELLER: wallets.Wallet
 BOOK: channels.SellerBook
@@ -102,6 +135,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             tx, _ = chain_inst.find_tx_by_id(self.headers.get("X-Payment", "").strip())
             STATS.record(path, "on_chain", price, tx["from_wallet"] if tx else "?")
             return True
+        if self._limited("challenge"):
+            return False
         ch = paywall.open_challenge(chain_inst, SELLER.address, price, path)
         ch["channel"] = _terms()  # or: open a channel once and pay calls with X-Channel
         body = json.dumps(ch).encode()
@@ -120,6 +155,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(503, {"status": "integrity check failed", "reason": chain_inst.corrupt})
             else:
                 self._send(200, {"status": "ok", "chain_blocks": len(chain_inst.blocks)})
+            return
+        if self.path.startswith("/faucet") and self._limited("faucet"):
             return
         if self.path.startswith("/faucet"):
             # free test faucet: mint 100 PMX to a named local wallet, mine at once
@@ -202,6 +239,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path.startswith("/tx") and self._limited("tx"):
+            return
         if self.path.startswith("/tx"):
             # agents submit a signed tx; the server (sole miner) verifies and mines it
             try:
@@ -246,6 +285,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, {"settled": True, "channel": cid, "paid_to_seller": tx["amount"], "block": blk.index})
             return
         self._send(404, {"error": "not found"})
+
+    def _limited(self, kind: str) -> bool:
+        """Send 429 and return True when this client is over its `kind` limit."""
+        wait = LIMITS.allow(self.client_address[0], kind)
+        if not wait:
+            return False
+        body = json.dumps({"error": "too many requests", "kind": kind, "retry_after_s": round(wait, 2)}).encode()
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Retry-After", str(max(1, int(wait + 0.999))))
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = self.command == "POST"  # an unread body must not become the next request
+        return True
 
     def _send(self, code: int, obj: dict):
         body = json.dumps(obj, indent=1).encode()

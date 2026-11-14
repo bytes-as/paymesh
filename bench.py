@@ -27,7 +27,8 @@ def free_port():
 def run(n_chain: int, n_chan: int):
     home, client_home = tempfile.mkdtemp(), tempfile.mkdtemp()
     port, eport = free_port(), free_port()
-    env = dict(os.environ, PAYMESH_HOME=home, PAYMESH_API_PORT=str(port), PAYMESH_EXPLORER_PORT=str(eport))
+    env = dict(os.environ, PAYMESH_HOME=home, PAYMESH_API_PORT=str(port), PAYMESH_EXPLORER_PORT=str(eport),
+               PAYMESH_FAUCET_BURST="100000", PAYMESH_TX_BURST="100000", PAYMESH_CHALLENGE_BURST="100000")
     srv = subprocess.Popen([sys.executable, os.path.join(HERE, "paymesh.py"), "serve"], env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:

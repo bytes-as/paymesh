@@ -102,6 +102,18 @@ class EndToEnd(unittest.TestCase):
         code, body = http(self.base + f"/account?address={me}")
         self.assertEqual(json.loads(body)["balance"], 0)
 
+    def test_5_spam_gets_429_with_retry_after(self):
+        old = server.LIMITS.limits["faucet"]
+        server.LIMITS.limits["faucet"] = (3, 0.01)
+        try:
+            codes = [http(self.base + f"/faucet?address={'cd' * 32}")[0] for _ in range(6)]
+        finally:
+            server.LIMITS.limits["faucet"] = old
+            server.LIMITS.buckets.clear()
+        self.assertEqual(codes[:3], [200, 200, 200])
+        self.assertEqual(set(codes[3:]), {429})
+        self.assertEqual(http(self.base + "/health")[0], 200)
+
     def test_4_explorer_escapes_hostile_memos(self):
         w = wallets.load_or_create("e2e-xss")
         buyer_agent.ensure_funded(self.chain, w, 10)
