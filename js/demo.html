@@ -26,6 +26,7 @@ an x402 route; the API's other routes stay closed to it.</p>
   <button id="hub">Hub: one deposit, two sellers</button>
   <button id="mint" class="alt">Try to mint coins (GET /faucet)</button>
   <button id="peek" class="alt">Try to read /account</button>
+  <button id="renew" class="alt">New wallet</button>
 </div>
 <div id="log"></div>
 <script src="paymesh.js"></script>
@@ -69,9 +70,9 @@ an x402 route; the API's other routes stay closed to it.</p>
     }
   }
   document.getElementById("buy").onclick = () => buy();
-  document.getElementById("fast").onclick = () => buy({ channelTicks: 50 });
+  document.getElementById("fast").onclick = () => buy({ channelTicks: 30 });  // the deposits fit one faucet (100 PMX)
   document.getElementById("hub").onclick = async () => {
-    const opts = { channelTicks: 60, hub: true };
+    const opts = { channelTicks: 40, hub: true };
     const shop = document.getElementById("shop").value.replace(/\/+$/, "");
     for (const [base, path] of [[api(), "/premium/price"], [shop, "/forecast"]]) {
       const t0 = performance.now();
@@ -95,6 +96,10 @@ an x402 route; the API's other routes stay closed to it.</p>
       log("ok", `${label}: REFUSED (the browser got no CORS answer: ${e.name})`);
     }
   }
+  document.getElementById("renew").onclick = () => {  // e.g. after a refused payment locked this one
+    localStorage.removeItem(KEY);
+    location.reload();
+  };
   document.getElementById("mint").onclick = () => forbidden("mint coins", `/faucet?address=${wallet.address}`);
   document.getElementById("peek").onclick = () => forbidden("read /account", `/account?address=${wallet.address}`);
 </script>

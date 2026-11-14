@@ -55,8 +55,11 @@ with test coins from a third terminal:
 py -3 wallet.py faucet <the address>
 ```
 
-Then click the blue buttons (a tx, a channel, the hub paying both sellers). The red ones
-show that a page on another site can't mint coins or read accounts. Tested in Edge; any
+Then click the blue buttons (a tx, a channel, the hub paying both sellers; together they
+need 78 of the faucet's 100 PMX). The red ones show that a page on another site can't mint
+coins or read accounts. A payment refused after signing (say, too little money) locks the
+page's wallet, so that it never reuses a one-time key a seller has seen: click "New wallet"
+and fund that one. Tested in Edge; any
 current browser should do (Firefox: open the same URL).
 
 **5. Stop**: Ctrl+C the weather seller and the page server, then `py -3 paymesh.py stop`.

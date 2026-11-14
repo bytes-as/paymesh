@@ -318,7 +318,8 @@
     _key() {
       const w = this.wallet;
       if (w.locked !== null) {
-        throw new PaymentError(`key ${w.locked} was seen in a refused payment and must not sign again: retire it from a script (py -3 wallet.py) or use a new wallet`);
+        throw new PaymentError(`key ${w.locked} was seen in a refused payment and must not sign again: use a new wallet, `
+          + `or retire the key with this wallet's seed (pay yourself 1 PMX through POST /tx from a script)`);
       }
       return w.nextIndex;
     }
