@@ -62,22 +62,41 @@ class BuyerChannel:
 
 
 class SellerBook:
-    """The seller's side: the best (i, word) seen per channel, kept on disk."""
+    """The seller's side: the best (i, word) seen per channel, kept on disk.
+
+    Each accepted payment appends one line "<channel> <i> <word>" before the
+    call is served, so a restarted seller never takes a spent word again.
+    The log is compacted to one line per channel when it grows.
+    """
+
+    COMPACT_AT = 50_000  # lines
 
     def __init__(self, path: str, seller_address: str):
         self.path = path
         self.seller = seller_address
         self.lock = threading.Lock()
         self.book: dict = {}
+        self._lines = 0
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
-                self.book = json.load(f)
-
-    def _save(self):
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.book, f)
-        os.replace(tmp, self.path)
+                for line in f:
+                    parts = line.split()
+                    if len(parts) == 3 and parts[1].isdigit():  # a torn last line is skipped
+                        cid, i, w = parts[0], int(parts[1]), parts[2]
+                        if i > self.book.get(cid, {"i": 0})["i"]:
+                            self.book[cid] = {"i": i, "w": w}
+                        self._lines += 1
+    def _record(self, cid: str, i: int, w: str):
+        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(f"{cid} {i} {w}\n")
+        self._lines += 1
+        if self._lines > self.COMPACT_AT:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                for c, v in self.book.items():
+                    f.write(f"{c} {v['i']} {v['w']}\n")
+            os.replace(tmp, self.path)
+            self._lines = len(self.book)
 
     def accept(self, chain_, header: str, price: int) -> tuple[bool, str]:
         """Check an X-Channel header pays `price` PMX; record it if so."""
@@ -105,7 +124,7 @@ class SellerBook:
             if ch.hash_word(w, i - last["i"]) != last["w"]:
                 return False, "word is not on this channel's hash chain"
             self.book[cid] = {"i": i, "w": w}
-            self._save()
+            self._record(cid, i, w)
         return True, f"paid {(i - last['i']) * c['unit']} PMX on channel {cid[:12]} (tick {i}/{c['n']})"
 
     def best(self, cid: str):

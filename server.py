@@ -122,6 +122,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "channels": {k: v for k, v in chain_inst.ledger.channels.items() if v["buyer"] == addr and v["open"]}}
             self._send(200, info)
             return
+        if self.path.startswith("/channel/state"):
+            # the last tick this seller accepted: a restarted buyer resumes from it
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            cid = (q.get("channel") or [""])[0]
+            with chain_lock:
+                c = chain_inst.ledger.channels.get(cid)
+            if c is None:
+                self._send(404, {"error": "unknown channel"})
+                return
+            b = BOOK.best(cid) or {"i": 0}
+            self._send(200, {"channel": cid, "open": c["open"], "ticks": c["n"], "unit": c["unit"],
+                             "paid_ticks": b["i"], "expires": c["expires"]})
+            return
         if self.path.startswith("/channel/terms"):
             self._send(200, _terms())
             return

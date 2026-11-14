@@ -29,6 +29,7 @@ class PaymentError(Exception):
 
 
 class Client:
+    SAVE_EVERY = 64  # calls between saves of the channel state (resynced from the seller on start)
     def __init__(self, api: str, wallet: str, timeout: float = 10.0):
         self.api = api.rstrip("/")
         self.base_path = urllib.parse.urlsplit(self.api).path
@@ -39,6 +40,7 @@ class Client:
         self.channel: channels.BuyerChannel | None = None
         self.terms: dict | None = None
         self._lock = threading.Lock()
+        self._calls = 0
         self._load_channel()
 
     # --- HTTP ---
@@ -134,6 +136,10 @@ class Client:
             return
         c = channels.BuyerChannel(raw["ticks"], bytes.fromhex(raw["seed"]))
         c.id, c.spent = raw["id"], raw["spent"]
+        # the file is saved every SAVE_EVERY calls: the seller knows the last tick it took
+        code, st = self._req(f"/channel/state?channel={c.id}")
+        if code == 200:
+            c.spent = max(c.spent, st["paid_ticks"])
         self.channel, self.terms = c, raw["terms"]
 
     def open_channel(self, ticks: int, expires_in: int = 10_000) -> str:
@@ -183,7 +189,9 @@ class Client:
                 header = self.channel.pay(ticks)
             except ValueError as e:  # the channel ran out
                 raise PaymentError(str(e)) from None
-            self._save_channel()
+            self._calls += 1
+            if self._calls % self.SAVE_EVERY == 0:
+                self._save_channel()
         code, body = self._req(path, headers={"X-Channel": header})
         if code == 402:
             raise PaymentError(f"channel payment refused: {body.get('reason')}")
