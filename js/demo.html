@@ -55,12 +55,14 @@ an x402 route; the API's other routes stay closed to it.</p>
   async function buy(opts) {
     const t0 = performance.now();
     try {
+      const before = Object.fromEntries(Object.entries(wallet.channels).map(([k, c]) => [k, c.spent]));
       const r = await new Paymesh.Client(api(), wallet, save, opts).get("/premium/price");
       const ms = (performance.now() - t0).toFixed(0);
       if (r.paid) {
+        const used = Object.values(wallet.channels).find((c) => c.spent !== before[Object.keys(wallet.channels).find((k) => wallet.channels[k] === c)]);
         const how = r.via === "tx" ? `tx ${r.receipt.transaction.slice(0, 16)}…`
           : r.via === "channel-open" ? `opened channel ${r.tx.txid.slice(0, 12)}… inside the payment`
-          : `channel word ${Object.values(wallet.channels)[0].spent}/${Object.values(wallet.channels)[0].n}, no tx`;
+          : `channel word ${used.spent}/${used.n}, no tx`;
         log("ok", `PAID ${r.status} via ${r.via}: SYNTH/USD ${r.body.price} | ${how} | ${ms} ms | next key ${wallet.nextIndex}`);
       } else {
         log("no", `NOT PAID ${r.status}: ${(r.receipt && (r.receipt.errorMessage || r.receipt.errorReason)) || JSON.stringify(r.body)}`);
@@ -77,9 +79,10 @@ an x402 route; the API's other routes stay closed to it.</p>
     for (const [base, path] of [[api(), "/premium/price"], [shop, "/forecast"]]) {
       const t0 = performance.now();
       try {
+        const before = Object.fromEntries(Object.entries(wallet.channels).map(([k, c]) => [k, c.spent]));
         const r = await new Paymesh.Client(base, wallet, save, opts).get(path);
         const ms = (performance.now() - t0).toFixed(0);
-        const ch = Object.entries(wallet.channels).find(([seller, c]) => r.tx ? c.id === r.tx.txid : true);
+        const ch = Object.entries(wallet.channels).find(([k, c]) => c.spent !== before[k]);  // the one this call used
         const left = ch ? `hub channel ${ch[1].id.slice(0, 10)}… ${ch[1].spent}/${ch[1].n}` : "";
         log(r.paid ? "ok" : "no", `${r.paid ? "PAID" : "NOT PAID"} ${r.status} via ${r.via} at ${base}${path} | ${left} | ${ms} ms | next key ${wallet.nextIndex}`
           + (r.paid ? "" : ` | ${(r.receipt && (r.receipt.errorMessage || r.receipt.errorReason)) || ""}`));
