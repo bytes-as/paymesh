@@ -23,6 +23,7 @@ import chain
 import channels
 import paywall
 import wallets
+import facilitator
 import paymesh_x402 as x402
 HOST, PORT = "127.0.0.1", int(os.environ.get("PAYMESH_API_PORT", 8402))
 CURRENCY = "PMX"
@@ -105,6 +106,7 @@ SELLER: wallets.Wallet
 BOOK: channels.SellerBook
 HUB_WALLET: wallets.Wallet  # the hub: one buyer deposit, spent at any seller (see channels.SellerBook)
 HUB: channels.SellerBook
+FAC: "facilitator.Facilitator"  # x402 /verify, /settle, /supported for other resource servers
 NETWORK = ""  # x402 network id, set by start() from the genesis hash
 
 
@@ -266,6 +268,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/channel/terms"):
             self._send(200, _terms())
             return
+        if self.path.split("?")[0] == "/supported":
+            self._send(200, FAC.supported())
+            return
         if self.path.startswith("/hub/terms"):
             self._send(200, {"hub": HUB_WALLET.address, "unit": CHANNEL_UNIT, "currency": CURRENCY,
                              "max_ticks": chain.MAX_TICKS, "open": "POST /tx a signed channel_open to the hub",
@@ -311,6 +316,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self._send(200, {"accepted": True, "txid": tx["txid"], "block": blk.index})
             print(f"[api] tx {tx['txid'][:16]}.. mined in block {blk.index}")
+            return
+        if self.path.split("?")[0] in ("/verify", "/settle"):
+            # x402 facilitator: answer 200 with a VerifyResponse / SettlementResponse either way
+            settle_call = self.path.startswith("/settle")
+            if self._limited("tx" if settle_call else "challenge"):
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if not 0 < length <= MAX_TX_BYTES:
+                    self.close_connection = True
+                    raise ValueError(f"body must be 1..{MAX_TX_BYTES} bytes")
+                body = json.loads(self.rfile.read(length).decode())
+            except (ValueError, UnicodeDecodeError) as e:
+                self._send(400, {"error": f"facilitator request refused: {e}"})
+                return
+            try:
+                res = FAC.settle(body) if settle_call else FAC.verify(body)
+            except Exception as e:  # noqa: BLE001 - odd input must never kill the request
+                print(f"[api] facilitator {type(e).__name__}: {e}")
+                res = (x402.settlement(NETWORK, False, reason="unexpected_settle_error", message="malformed")
+                       if settle_call else {"isValid": False, "invalidReason": "unexpected_verify_error"})
+            if settle_call and res.get("success"):
+                STATS.record("facilitator", "on_chain" if res["transaction"] else "channel",
+                             int(res.get("amount", 0)), res.get("payer") or "?")
+            self._send(200, res)
             return
         if self.path.startswith("/hub/claim"):
             # a seller hands the hub a word a buyer paid it with; the hub credits that seller
@@ -477,7 +507,7 @@ def _settler(stop: threading.Event):
 
 
 def start(chain_: chain.Chain, port=PORT) -> http.server.ThreadingHTTPServer:
-    global chain_inst, SELLER, BOOK, NETWORK, HUB_WALLET, HUB
+    global chain_inst, SELLER, BOOK, NETWORK, HUB_WALLET, HUB, FAC
     chain_inst = chain_
     NETWORK = x402.network_id(chain_.blocks[0].hash())
     SELLER = wallets.load_or_create("seller")
@@ -486,6 +516,8 @@ def start(chain_: chain.Chain, port=PORT) -> http.server.ThreadingHTTPServer:
     HUB_WALLET = wallets.load_or_create("hub")
     HUB = channels.SellerBook(os.path.join(home, "hub_channels.log"), HUB_WALLET.address)
     BOOK.hub = _hub_claim(SELLER.address)  # this node's own API also takes hub channels
+    FAC = facilitator.Facilitator(chain_, chain_lock, lambda tx: submit_and_wait(tx), HUB, HUB_WALLET.address,
+                                  NETWORK, os.path.join(home, "facilitator_settled.log"))
     httpd = http.server.ThreadingHTTPServer((HOST, port), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     # a fast start trusted the checkpoint: re-check those blocks in full meanwhile

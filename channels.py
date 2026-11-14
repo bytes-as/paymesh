@@ -127,9 +127,9 @@ class SellerBook:
     def close(self):
         self.log.close()
 
-    def accept(self, chain_, header: str, price: int, payee: str | None = None) -> tuple[bool, str]:
+    def accept(self, chain_, header: str, price: int, payee: str | None = None, dry: bool = False) -> tuple[bool, str]:
         """Check an X-Channel header pays `price` PMX; record it if so. payee: hub mode, the
-        seller this word pays (the hub credits it)."""
+        seller this word pays (the hub credits it). dry: check only, record nothing (verify)."""
         parts = (header or "").split()
         # isdigit() alone takes '²' (latin-1 in a header), which int() refuses: ASCII digits only
         if len(parts) != 3 or not (parts[1].isascii() and parts[1].isdigit()):
@@ -167,6 +167,8 @@ class SellerBook:
                 return False, "word is not on this channel's hash chain"
             if payee is None and self.credits.get(cid):
                 return False, "a hub channel pays only through the hub"
+            if dry:
+                return True, f"would pay {paid} PMX on channel {cid[:12]} (tick {i}/{c['n']})"
             self.book[cid] = {"i": i, "w": w}
             if payee is not None:
                 cr = self.credits.setdefault(cid, {})
