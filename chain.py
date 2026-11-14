@@ -30,6 +30,7 @@ CHAIN_FILE = os.path.join(wallets.HOME, "chain.json")
 FAUCET = "0" * 64  # only the faucet may send unsigned txs
 MAX_MEMO = 256
 FAUCET_MAX = 100  # PMX per faucet mint
+CKPT_EVERY = 500  # blocks between ledger checkpoints (chain.json.ckpt)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 FORMAT = 3  # chain.json: a {"format": 3} line, then one block per line (append-only)
 
@@ -209,6 +210,8 @@ class Chain:
         self.ledger = Ledger()  # mined blocks only
         self.pledger = Ledger()  # mined blocks + pending txs
         self.lock = threading.RLock()
+        self.corrupt = None  # set when a background check finds the checkpoint lied
+        self._ckpt_used = None  # (height, ledger) a fast load trusted, until verified
         if os.path.exists(self.path):
             self.load()
 
@@ -246,7 +249,10 @@ class Chain:
                     raise ValueError(f"{self.path}: line {n + 1} is not a block")
                 good += len(line) + 1
         blocks = [Block(b["index"], b["timestamp"], b["txs"], b["prev_hash"], b["nonce"]) for b in dicts]
-        ledger, why = self._replay(blocks)
+        ckpt = self._read_checkpoint(blocks)
+        if ckpt:
+            self._ckpt_used = (ckpt[0], copy.deepcopy(ckpt[1]))
+        ledger, why = self._replay(blocks, ckpt)
         if ledger is None:
             raise ValueError(f"{self.path}: invalid chain: {why}")
         self.blocks, self.ledger, self.pledger, self.pending = blocks, ledger, copy.deepcopy(ledger), []
@@ -261,6 +267,54 @@ class Chain:
             for b in self.blocks:
                 f.write(json.dumps(b.to_dict()) + "\n")
         os.replace(tmp, self.path)
+
+    # --- checkpoints: the ledger as of a block, so a restart skips old signatures ---
+    def _ckpt_path(self) -> str:
+        return self.path + ".ckpt"
+
+    def _write_checkpoint(self):
+        lg = self.ledger
+        data = {"height": self.height, "tip": self.blocks[-1].hash(),
+                "ledger": {"balances": lg.balances, "keys": lg.keys, "txids": sorted(lg.txids),
+                           "channels": lg.channels, "height": lg.height}}
+        tmp = self._ckpt_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, self._ckpt_path())
+
+    def _read_checkpoint(self, blocks):
+        """(height, Ledger) from the checkpoint if it matches these blocks, else None."""
+        try:
+            with open(self._ckpt_path(), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            h = data["height"]
+            if not 0 < h <= len(blocks) or blocks[h - 1].hash() != data["tip"]:
+                return None  # another chain, or a rewritten history: verify everything
+            lg = Ledger()
+            raw = data["ledger"]
+            lg.balances, lg.keys, lg.txids = raw["balances"], raw["keys"], set(raw["txids"])
+            lg.channels, lg.height = raw["channels"], raw["height"]
+            return h, lg
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def verify_checkpoint(self) -> bool:
+        """Fully re-check the blocks a fast load took from the checkpoint. A ledger
+        that differs (an edited .ckpt) marks the chain corrupt: it takes no more txs."""
+        used = self._ckpt_used
+        if not used:
+            return True
+        h, trusted = used
+        with self.lock:
+            blocks = self.blocks[:h]
+        full, why = self._replay(blocks)
+        same = full is not None and (full.balances, full.keys, full.txids, full.channels) == \
+            (trusted.balances, trusted.keys, trusted.txids, trusted.channels)
+        if not same:
+            self.corrupt = f"checkpoint does not match the chain ({why if full is None else 'ledger differs'})"
+            print(f"[chain] INTEGRITY: {self.corrupt}; refusing new txs")
+        self._ckpt_used = None
+        return same
 
     def _append(self, b: Block):
         """Add one block to the file: cost stays flat as the chain grows."""
@@ -316,6 +370,8 @@ class Chain:
             return self.pledger.current_key(address)
 
     def add_tx(self, tx: dict):
+        if self.corrupt:
+            raise ValueError(f"chain integrity check failed: {self.corrupt}")
         with self.lock:
             self.pledger.apply(tx)  # raises ValueError on any broken rule
             self.pending.append(tx)
@@ -331,6 +387,8 @@ class Chain:
                 self.ledger.apply(tx)
             self.ledger.height = self.pledger.height = len(self.blocks)
             self._append(b)
+            if self.height % CKPT_EVERY == 0:
+                self._write_checkpoint()
             return b
 
     @staticmethod
@@ -341,16 +399,22 @@ class Chain:
 
     # --- validation / ledger ---
     @staticmethod
-    def _replay(blocks):
-        ledger = Ledger()
+    def _replay(blocks, checkpoint=None):
+        """Check every block's index, link and PoW; apply every tx's rules, except
+        blocks a matching checkpoint already covers (its ledger is taken as is)."""
+        ckpt_h, ledger = checkpoint if checkpoint else (0, Ledger())
         prev = "0" * 64
         for n, b in enumerate(blocks):
             if b.index != n:
                 return None, f"block {n}: wrong index {b.index}"
             if b.prev_hash != prev:
                 return None, f"block {b.index}: broken link"
-            if not b.hash().startswith("0" * DIFFICULTY):
+            h = b.hash()
+            if not h.startswith("0" * DIFFICULTY):
                 return None, f"block {b.index}: bad PoW"
+            if n < ckpt_h:
+                prev = h
+                continue
             ledger.height = n
             for tx in b.txs:
                 try:
@@ -358,10 +422,11 @@ class Chain:
                 except ValueError as e:
                     return None, f"block {b.index}: bad tx {str(tx.get('txid', '?'))[:8]} ({e})"
             ledger.height = n + 1
-            prev = b.hash()
+            prev = h
         return ledger, "ok"
 
     def valid(self) -> tuple[bool, str]:
+        """Full check of every block and tx (no checkpoint)."""
         with self.lock:
             ledger, why = self._replay(self.blocks)
             return ledger is not None, why

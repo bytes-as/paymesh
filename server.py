@@ -82,7 +82,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/health"):
-            self._send(200, {"status": "ok", "chain_blocks": len(chain_inst.blocks)})
+            if chain_inst.corrupt:
+                self._send(503, {"status": "integrity check failed", "reason": chain_inst.corrupt})
+            else:
+                self._send(200, {"status": "ok", "chain_blocks": len(chain_inst.blocks)})
             return
         if self.path.startswith("/faucet"):
             # free test faucet: mint 100 PMX to a named local wallet, mine at once
@@ -237,6 +240,8 @@ def start(chain_: chain.Chain, port=PORT) -> http.server.ThreadingHTTPServer:
     BOOK = channels.SellerBook(os.path.join(os.path.dirname(os.path.abspath(chain_.path)), "seller_channels.json"), SELLER.address)
     httpd = http.server.ThreadingHTTPServer((HOST, port), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    # a fast start trusted the checkpoint: re-check those blocks in full meanwhile
+    threading.Thread(target=chain_.verify_checkpoint, daemon=True).start()
     httpd.settler_stop = threading.Event()
     threading.Thread(target=_settler, args=(httpd.settler_stop,), daemon=True).start()
     routes = "  ".join(f"{p}={v} PMX" for p, v in PRICES.items())

@@ -8,3 +8,4 @@ paymesh.log
 __pycache__/
 seller_channels.json
 buyer_channels/
+*.ckpt

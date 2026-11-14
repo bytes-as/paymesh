@@ -107,6 +107,61 @@ class LedgerAttacks(Scratch):
         with self.assertRaises(ValueError):
             ch.Chain(self.c.path)
 
+    def test_checkpoints_speed_up_loading_but_cannot_hide_a_rewrite(self):
+        old = ch.CKPT_EVERY
+        ch.CKPT_EVERY = 4
+        try:
+            buyer = self.funded("buyer", 100)
+            seller = self.funded("seller", 0)
+            for k in range(6):
+                self.pay(buyer, seller.address, 1, f"p{k}")
+            self.assertTrue(os.path.exists(self.c.path + ".ckpt"))
+            again = ch.Chain(self.c.path)  # loads through the checkpoint
+            self.assertEqual(again.balance(buyer.address), 94)
+            # rewrite an early paid tx and re-mine every later block: links and PoW hold again
+            with open(self.c.path) as f:
+                lines = f.read().splitlines()
+            blocks = [json.loads(x) for x in lines[1:]]
+            target = next(i for i, b in enumerate(blocks) if b["txs"] and b["txs"][0].get("memo") == "p0")
+            blocks[target]["txs"][0]["to_wallet"] = "ee" * 32  # redirect a payment
+            prev = blocks[target - 1]["hash"]
+            for b in blocks[target:]:
+                blk = ch.Block(b["index"], b["timestamp"], b["txs"], prev, 0)
+                ch.Chain._mine(blk)
+                b.update(blk.to_dict())
+                prev = blk.hash()
+            with open(self.c.path, "w") as f:
+                f.write(lines[0] + "\n" + "".join(json.dumps(b) + "\n" for b in blocks))
+            with self.assertRaises(ValueError):  # the tip no longer matches: full check, bad signature
+                ch.Chain(self.c.path)
+        finally:
+            ch.CKPT_EVERY = old
+
+    def test_an_edited_checkpoint_is_caught_and_stops_txs(self):
+        old = ch.CKPT_EVERY
+        ch.CKPT_EVERY = 4
+        try:
+            buyer = self.funded("buyer", 100)
+            seller = self.funded("seller", 0)
+            for k in range(6):
+                self.pay(buyer, seller.address, 1, f"p{k}")
+            with open(self.c.path + ".ckpt") as f:
+                ck = json.load(f)
+            ck["ledger"]["balances"][buyer.address] = 10**9  # forged balance, tip hash untouched
+            with open(self.c.path + ".ckpt", "w") as f:
+                json.dump(ck, f)
+            fast = ch.Chain(self.c.path)
+            self.assertFalse(fast.verify_checkpoint())
+            self.assertIsNotNone(fast.corrupt)
+            tx = fast.new_tx(buyer.address, seller.address, 1, "after")
+            wallets.sign_tx(tx, buyer, fast)
+            with self.assertRaises(ValueError):
+                fast.add_tx(tx)
+            os.remove(self.c.path + ".ckpt")
+            self.assertTrue(ch.Chain(self.c.path).verify_checkpoint())
+        finally:
+            ch.CKPT_EVERY = old
+
     def test_a_block_cut_off_by_a_crash_is_dropped_cleanly(self):
         buyer = self.funded("buyer", 100)
         seller = self.funded("seller", 0)
