@@ -230,9 +230,11 @@ class Node(unittest.TestCase):
         finally:
             server.submit_and_wait = real
         mined = [t for t in self.chain.all_txs() if t["from_wallet"] == c.wallet.address]
-        self.assertEqual(sorted(codes), [200, 402])
-        self.assertEqual(len(mined), 1)
-        self.assertEqual(c.balance(), 100 - 5 - 1)
+        # usually [200, 402]; if the second (next-key) tx reserves first, the ledger refuses it and
+        # both get 402 with nothing charged. Never: two mined, or a charge without a served call
+        self.assertIn(sorted(codes), ([200, 402], [402, 402]))
+        self.assertEqual(len(mined), codes.count(200))
+        self.assertEqual(c.balance(), 100 - (5 + 1) * len(mined))
 
     def test_malformed_payment_signature_is_400(self):
         code, hdrs, body = self.raw("/premium/price", {x402.SIGNATURE: "not base64!"})

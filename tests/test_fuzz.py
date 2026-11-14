@@ -147,6 +147,34 @@ class Fuzz(unittest.TestCase):
         self.assertEqual(self.c._req("/health")[0], 200)
         self.assertTrue(self.chain.valid()[0])
 
+    def test_unicode_digit_ticks_are_refused_on_both_paths(self):
+        """QA-PM-1: str.isdigit() takes '²', '٣', '３'...; int() refuses some of them. Every one
+        gets 402 (X-Channel) or 400 (x402), never a dropped connection."""
+        import http.client
+        import paymesh_x402 as x402
+        self.c.faucet()
+        if not self.c.channel:
+            self.c.open_channel(ticks=20)
+        cid, word = self.c.channel.id, "ab" * 32
+        digits = ["²", "³", "¹", "1²", "٣", "３", "३", "①", "½", "⅕"]
+        code, _ = self.c._req("/premium/price")
+        acc = self.c._offers("/premium/price")["channel"]
+        for d in digits:
+            conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+            try:  # headers go out as latin-1 where they can, UTF-8 bytes otherwise
+                conn.putrequest("GET", "/premium/price")
+                conn.putheader("X-Channel", f"{cid} {d} {word}".encode("utf-8"))
+                conn.endheaders()
+                r = conn.getresponse()
+                r.read()  # read it all: closing on an unread body resets the socket
+                status = r.status
+            finally:
+                conn.close()
+            self.assertEqual(status, 402, repr(d))
+            sig = x402.encode({"x402Version": 2, "accepted": acc, "payload": {"channel": cid, "tick": d, "word": word}})
+            self.assertEqual(self.c._req("/premium/price", headers={x402.SIGNATURE: sig})[0], 400, repr(d))
+        self.assertEqual(self.c._req("/health")[0], 200)
+
     def _raw(self, path, body):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
