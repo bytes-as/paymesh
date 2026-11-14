@@ -65,12 +65,33 @@ def open_challenge(chain, recipient: str, amount: int, path: str) -> dict:
     }
 
 
+def challenge_open(memo: str, path: str, recipient: str, amount: int) -> tuple[bool, str]:
+    """Read-only: would a tx with this memo, recipient and amount pay an open challenge for path?
+    Lets a server refuse a signed tx before it moves the buyer's money."""
+    parts = memo.split(":") if isinstance(memo, str) else []
+    if len(parts) != 3:
+        return False, "tx memo is not a payment challenge"
+    with _lock:
+        ch = _open_challenges.get(parts[1])
+        if ch is None or time.time() > ch["expires"]:
+            return False, "unknown, expired or already-spent payment nonce"
+        if ch["path"] != path:
+            return False, "challenge was for a different path"
+        if memo != ch["memo"] or recipient != ch["recipient"] or amount != ch["amount"]:
+            return False, "tx does not match the challenge memo/recipient/amount"
+    return True, "open"
+
+
 def verify_payment(chain, headers, path: str) -> tuple[bool, str]:
     """Return (ok, reason). ok=True only when a mined tx pays this exact open challenge."""
     txid = headers.get("X-Payment", "") or ""
     if not txid:
         return False, "no X-Payment header"
-    tx, block = chain.find_tx_by_id(txid.strip())
+    return verify_txid(chain, txid.strip(), path)
+
+
+def verify_txid(chain, txid: str, path: str) -> tuple[bool, str]:
+    tx, block = chain.find_tx_by_id(txid)
     if tx is None:
         return False, "txid not found in any mined block"
     parts = tx.get("memo", "").split(":")
