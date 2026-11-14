@@ -114,6 +114,16 @@ def run(node: str) -> list:
             lambda c, b: c == 400)
     attempt("x402: garbage PAYMENT-SIGNATURE",
             lambda: me._req("/premium/price", headers={x402.SIGNATURE: "e30=" * 9000}), lambda c, b: c == 400)
+    kept = []  # play a seller that refuses a buyer's signed tx but keeps a copy
+    real_pay = victim._pay
+    victim._pay = lambda path, acc, payload: (kept.append(payload.get("transaction")), real_pay(path, acc, payload))[1]
+    o = fresh()
+    try:  # an unknown challenge: the seller refuses, the victim retires the key that signed it
+        victim._on_chain("/premium/price", dict(o["tx"], extra=dict(o["tx"]["extra"], memo=f"{seller}:{'0' * 32}:5")))
+    except Exception:  # noqa: BLE001 - PaymentError expected
+        pass
+    victim._pay = real_pay
+    attempt("x402: a seller mines a refused tx it kept", lambda: post(kept[0]), no)
     attempt("wallet name that escapes the wallet folder", lambda: me._node("/faucet?name=../../evil"), no)
     attempt("malformed JSON body", lambda: raw_post(node, "/tx", b"{"), lambda c, b: c == 400)
     attempt("node still healthy afterwards", lambda: me._node("/health"), lambda c, b: c == 200)
