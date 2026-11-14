@@ -200,10 +200,22 @@ being paid:
    to the buyer. `POST /channel/close {channel}` at the node closes a hub
    channel. The expiry rules of 1b apply: no ticks within 20 blocks of expiry,
    and the hub settles before a refund.
+4. Payouts: the hub doesn't make sellers wait for the close. Every
+   `PAYMESH_HUB_PAYOUT_S` seconds (default 60), or as soon as
+   `PAYMESH_HUB_PAYOUT_MIN` PMX (default 50) are owed on a channel, it sends a
+   `channel_payout` (section 3). This pays every seller its credits revealed
+   since the last payout, and the channel stays open. The chain records
+   `paid_ticks`, `paid_word` and per-seller `paid_shares`. The hub works out what
+   it owes from those and its credit log, so a crash before, during or after a
+   payout re-sends nothing that was mined. The ledger refuses a second payout
+   of the same ticks anyway. Close and refund then move only what is left: a
+   close pays the sellers the ticks revealed since the last payout, and a refund
+   returns the deposit minus what was paid out. A close with nothing new after
+   a payout takes its fee from what goes back to the buyer.
 
-Trust: a seller is paid at the close, by the hub's signature over the splits.
-Until then it trusts the hub (here: the node, which is also the only miner) to
-keep its credit. The buyer trusts nothing new: the hub can only claim words
+Trust: a seller is paid at each payout and at the close, by the hub's signature over
+the splits. Between them it trusts the hub (here: the node, which is also the only
+miner) to keep its credit. The buyer trusts nothing new: the hub can only claim words
 the buyer revealed.
 
 Cost, measured on this machine (400 sequential calls; the machine was noisy):
@@ -238,10 +250,11 @@ the data folder).
 ```json
 {"from_wallet": "<addr>", "to_wallet": "<addr>", "amount": 5, "memo": "text <= 256",
  "txid": "<64 hex, unique>", "next_key": "<fingerprint of the sender's next key>",
- "kind": "pay | channel_open | channel_close | channel_refund",
+ "kind": "pay | channel_open | channel_close | channel_payout | channel_refund",
  "sig": ["<64 hex>", ...], "pub": [...Lamport only...], "fee": 1,
  "anchor", "ticks", "unit", "expires"   // channel_open
  "channel", "ticks", "word", "splits"   // channel_close (splits optional) / channel_refund (channel only)
+ "shares"                               // channel_payout (with channel, ticks, word, splits)
 }
 ```
 
@@ -253,7 +266,8 @@ when `chain.json` is loaded:
 * `pay`: signed by the sender's current key; the sender holds the amount (pending txs counted);
 * `channel_open`: `amount == ticks * unit`, `1 <= ticks <= 1,000,000`, `expires` in the future, funds held;
 * `channel_close`: from the channel's seller to its buyer, `amount == ticks * unit`, `sha256^ticks(word) == anchor`, signed by the seller; optional `splits` `{address: PMX}` (1..64 payees, whole PMX above 0, adding up to `amount`) pays those addresses instead of the seller (a hub paying its sellers); the signature covers it;
-* `channel_refund`: from the buyer to itself for the whole deposit, from the `expires` height on; the first opens the refund window (1b.7), the second, after `refund_at`, pays the deposit back;
+* `channel_payout`: from the channel's seller to itself while the channel is open, signed by the seller: `ticks` above the last paid tick (`paid_ticks`, 0 at first), `sha256^(ticks - paid_ticks)(word) == paid_word` (the anchor at first), `amount == (ticks - paid_ticks) * unit`. `shares` (gross, per payee) add up to `amount`; `splits` (net, each at most its payee's share) add up to `amount - fee`. The ledger pays the splits and records `paid_ticks`, `paid_word` and `paid_shares`. Paying out the whole deposit ends the channel. After a payout, `channel_close` needs `ticks >= paid_ticks`: its `amount` stays `ticks * unit`, its splits cover only `(ticks - paid_ticks) * unit - fee`, and with nothing new it has no splits and its fee comes out of the buyer's rest;
+* `channel_refund`: from the buyer to itself for the deposit minus what was paid out, from the `expires` height on; the first opens the refund window (1b.7), the second, after `refund_at`, pays the deposit back;
 * the faucet (address `0` x 64) mints at most 100 PMX per tx, only through `GET /faucet`.
 * a tx carries only its kind's fields (above); anything else is refused.
 * `fee` (signed, every kind but the faucet): see section 6.
@@ -271,6 +285,7 @@ replay without fees, so the existing chain stays valid as it is.
 |---|---|---|
 | `pay`, `channel_open` | the sender | its balance: it must hold `amount + fee` |
 | `channel_close` | the seller | its share: it gets `amount - fee` (with `splits`, the splits add up to `amount - fee`; a hub takes the fee from the largest shares) |
+| `channel_payout` | the seller | the payout: the splits add up to `amount - fee` (a hub takes the fee from the largest shares) |
 | `channel_refund` | the buyer | request: its balance; claim: the deposit (it gets `deposit - fee`) |
 
 What it costs: a WOTS tx (~5 KB) burns 1 PMX; a Lamport tx (~52 KB) 7; a
