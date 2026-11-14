@@ -75,6 +75,18 @@ class _Node:
             self._network = body["network"]
         return self._network
 
+    @property
+    def height(self) -> int:
+        """The node's chain height, cached CHANNEL_TTL seconds (channel ticks stop near expiry)."""
+        hit = getattr(self, "_height", None)
+        if hit and time.monotonic() - hit[0] < self.CHANNEL_TTL:
+            return hit[1]
+        code, body = self._get("/health")
+        if code != 200 or not isinstance(body, dict) or not isinstance(body.get("chain_blocks"), int):
+            raise ValueError(f"node height unknown: {body}")
+        self._height = (time.monotonic(), body["chain_blocks"])
+        return body["chain_blocks"]
+
     def submit(self, tx):
         """x402 settlement: put the buyer's signed tx on chain through the node."""
         code, res = self.post("/tx", tx)

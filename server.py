@@ -353,6 +353,15 @@ def submit_and_wait(tx) -> "chain.Block":
         raise ValueError("a tx is a JSON object")
     if tx.get("from_wallet") == chain.FAUCET:
         raise ValueError("faucet mints come from GET /faucet only")
+    cid = tx.get("channel")
+    if tx.get("kind") == "channel_refund" and isinstance(cid, str) and BOOK.best(cid):
+        # this node is the seller and the miner: settle what the buyer spent before a refund can take it back
+        c = chain_inst.ledger.channels.get(cid)
+        if c and c["open"]:
+            try:
+                settle(cid)
+            except ValueError as e:
+                print(f"[api] settle {cid[:12]} before refund failed: {e}")
     try:
         with chain_lock:
             chain_inst.add_tx(tx)  # raises on any broken ledger rule

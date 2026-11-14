@@ -70,9 +70,11 @@ class SellerBook:
     """
 
     COMPACT_AT = 50_000  # lines
+    STOP_WITHIN = 20  # blocks: no ticks once a channel is this close to its refund height
 
-    def __init__(self, path: str, seller_address: str):
+    def __init__(self, path: str, seller_address: str, stop_within: int | None = None):
         self.path = path
+        self.stop_within = self.STOP_WITHIN if stop_within is None else stop_within
         self.seller = seller_address
         self.lock = threading.Lock()
         self.book: dict = {}
@@ -81,7 +83,7 @@ class SellerBook:
             with open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     parts = line.split()
-                    if len(parts) == 3 and parts[1].isdigit():  # a torn last line is skipped
+                    if len(parts) == 3 and parts[1].isascii() and parts[1].isdigit():  # a torn last line is skipped
                         cid, i, w = parts[0], int(parts[1]), parts[2]
                         if i > self.book.get(cid, {"i": 0})["i"]:
                             self.book[cid] = {"i": i, "w": w}
@@ -101,7 +103,8 @@ class SellerBook:
     def accept(self, chain_, header: str, price: int) -> tuple[bool, str]:
         """Check an X-Channel header pays `price` PMX; record it if so."""
         parts = (header or "").split()
-        if len(parts) != 3 or not parts[1].isdigit():
+        # isdigit() alone takes '²' (latin-1 in a header), which int() refuses: ASCII digits only
+        if len(parts) != 3 or not (parts[1].isascii() and parts[1].isdigit()):
             return False, "X-Channel must be '<channel id> <i> <word>'"
         cid, i, w = parts[0], int(parts[1]), parts[2].lower()
         if not ch.HEX64.match(w):
@@ -115,6 +118,10 @@ class SellerBook:
             return False, "channel already settled"
         if c["seller"] != self.seller:
             return False, "channel pays someone else"
+        height = getattr(chain_, "height", None)
+        if height is not None and c["expires"] - height <= self.stop_within:
+            # the buyer may refund from `expires` on: a tick taken now might never be settled
+            return False, f"channel is refundable at block {c['expires']}, {c['expires'] - height} blocks away: too close to settle"
         with self.lock:
             last = self.book.get(cid, {"i": 0, "w": c["anchor"]})
             if not last["i"] < i <= c["n"]:

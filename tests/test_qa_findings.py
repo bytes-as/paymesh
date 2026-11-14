@@ -1,6 +1,6 @@
 """QA findings: each test reproduces one bug found by QA. A known open bug is marked
 expectedFailure so the suite stays green; when the fix lands the test reports an
-"unexpected success": then drop the decorator. Scratch node only (temp dir, free port)."""
+"unexpected success": then drop the decorator. QA-PM-1 and QA-PM-2 are fixed. Scratch node only (temp dir, free port)."""
 import http.client
 import os
 import sys
@@ -50,7 +50,6 @@ class QAFindings(unittest.TestCase):
 
     # QA-PM-1: str.isdigit() accepts '²' (latin-1 0xB2 in a header) but int() refuses it:
     # SellerBook.accept raises ValueError, the request thread dies, client gets no response.
-    @unittest.expectedFailure
     def test_qa_pm_1_superscript_tick_gets_402_not_dropped(self):
         for h in ("ab \xb2 " + "ab" * 32, "ab 1\xb9 " + "ab" * 32, "ab \xb3 " + "ab" * 32):
             self.assertEqual(self._get("/premium/price", {"X-Channel": h}), 402, repr(h))
@@ -58,7 +57,6 @@ class QAFindings(unittest.TestCase):
     # QA-PM-2: SellerBook.accept never looks at the channel's expiry. A buyer opens a channel
     # that is refundable at once (expires = height + 1), spends every tick on paid calls,
     # then refunds the whole deposit before the 2 s settler runs: service for free.
-    @unittest.expectedFailure
     def test_qa_pm_2_expired_channel_cannot_buy_then_refund(self):
         cl = Client(f"http://127.0.0.1:{self.port}", "qa-buyer")
         cl.faucet()
@@ -79,6 +77,32 @@ class QAFindings(unittest.TestCase):
         paid = self.chain.ledger.channels[bc.id].get("paid", 0)
         # every served call must end up paid to the seller: served * 5 PMX
         self.assertEqual(paid, served * 5, f"served {served} paid calls, seller was paid {paid} PMX")
+
+    # QA-PM-2b: the cutoff alone races: pay while the channel is just outside it, then mine
+    # blocks fast (each tx is a block) and refund before the 2 s settler wakes. The node is
+    # the seller and the miner, so it settles first when that refund arrives.
+    def test_qa_pm_2b_refund_race_is_settled_first(self):
+        cl = Client(f"http://127.0.0.1:{self.port}", "qa-racer")
+        cl.faucet()
+        seller = cl._node("/channel/terms")[1]["seller"]
+        bc = channels.BuyerChannel(50)
+        led = cl._ledger()
+        tx = led.new_tx(cl.wallet.address, seller, 50, "channel:open")
+        expires = self.chain.height + channels.SellerBook.STOP_WITHIN + 3
+        tx.update(kind="channel_open", anchor=bc.anchor, ticks=50, unit=1, expires=expires)
+        wallets.sign_tx(tx, cl.wallet, led)
+        self.assertEqual(cl._req("/tx", tx)[0], 200)
+        bc.id = tx["txid"]
+        served = sum(self._get("/premium/price", {"X-Channel": bc.pay(5)}) == 200 for _ in range(4))
+        self.assertGreater(served, 0)
+        while self.chain.height < expires:
+            cl._node(f"/faucet?address={'ee' * 32}")  # one block each
+        led = cl._ledger()
+        rtx = led.new_tx(cl.wallet.address, cl.wallet.address, 50, "channel:refund")
+        rtx.update(kind="channel_refund", channel=bc.id)
+        wallets.sign_tx(rtx, cl.wallet, led)
+        cl._req("/tx", rtx)
+        self.assertEqual(self.chain.ledger.channels[bc.id].get("paid", 0), served * 5)
 
 
 if __name__ == "__main__":
