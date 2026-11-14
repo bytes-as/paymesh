@@ -1,5 +1,7 @@
 # paymesh
 
+[![check](https://github.com/bytes-as/paymesh/actions/workflows/check.yml/badge.svg)](https://github.com/bytes-as/paymesh/actions/workflows/check.yml)
+
 **Pay-per-call for APIs, built for AI agents.** An agent calls a paid endpoint, gets
 `402 Payment Required`, pays inside its next request and gets the answer, in milliseconds.
 No accounts, no cards, no API keys, no subscriptions. It speaks [x402 v2](https://github.com/x402-foundation/x402),
@@ -211,9 +213,8 @@ means and which test or attack covers it: [SECURITY.md](SECURITY.md). Measuremen
   one-time key; recovering it takes its seed and a script (the demo just makes a new one).
 * The facilitator settles hub channels only (it holds no seller's key to close a
   direct one) and does not take the native `X-Payment` / `X-Channel` headers.
-* Tested here on Windows with Python 3.14 only. `.github/workflows/check.yml` runs
-  `check.py` on Ubuntu and Windows with Python 3.10 and 3.13 once the repo is pushed;
-  macOS has never been run.
+* Tested on Windows (Python 3.10, 3.13, 3.14) and Ubuntu (3.10, 3.13): `check.py` runs on
+  every push (`.github/workflows/check.yml`). macOS has never been run.
 * x402: v2 only, no v1 (`X-PAYMENT`, which here is the native txid header). Paid routes
   are CORS-open for browser clients; other routes refuse other sites (PROTOCOL 0c). The node is
   also an x402 facilitator (`/verify`, `/settle`, `/supported`) for resource servers

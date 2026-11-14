@@ -23,3 +23,9 @@ In the same conditions a hub channel (one deposit that pays any seller, every wo
 through the hub's book, payouts running) did a median 1,288 paid calls per second
 (p50 0.66 ms) against 1,703 (0.55 ms) for a direct channel; `bench.py` measures both.
 
+
+On GitHub's CI machines (`check.py`'s short run, `bench.py 50 1000`, 2026-11-15), Ubuntu did
+189–196 on-chain, 2,186–2,458 channel and 2,209–2,313 hub calls per second; Windows 67–82,
+1,282–1,422 and 1,237–1,401. The first CI run had shown 24 channel calls per second on Ubuntu:
+a reply's headers and body left in separate writes and waited ~40 ms for a delayed ACK. The
+HTTP handlers now set TCP_NODELAY.
