@@ -22,12 +22,14 @@ import os
 import re
 import secrets
 
-WALLET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wallets")
+# PAYMESH_HOME holds chain.json and wallets/ (default: this folder)
+HOME = os.environ.get("PAYMESH_HOME") or os.path.dirname(os.path.abspath(__file__))
+WALLET_DIR = os.path.join(HOME, "wallets")
 BITS = 256  # one secret pair per bit of the sha256 digest
 VERSION = 3
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
-MAX_KEY_SEARCH = 100_000
+MAX_KEY_SEARCH = 20_000
 
 
 def sha256_hex(b: bytes) -> str:
@@ -53,8 +55,14 @@ def pubkey_fingerprint(pub: list) -> str:
     return sha256_hex("".join(pub).encode())
 
 
+EXTRA_FIELDS = ("kind", "anchor", "ticks", "unit", "expires", "channel", "word")
+
+
 def _msg_digest(tx: dict) -> bytes:
     msg = f"{tx['from_wallet']}|{tx['to_wallet']}|{tx['amount']}|{tx['memo']}|{tx['txid']}|{tx.get('next_key', '')}"
+    extra = {k: tx[k] for k in EXTRA_FIELDS if k in tx}
+    if extra:  # channel txs: the signature covers their terms too
+        msg += "|" + json.dumps(extra, sort_keys=True)
     return hashlib.sha256(msg.encode()).digest()
 
 
@@ -81,11 +89,16 @@ class Wallet:
         return pubkey_fingerprint(self.key(i)[1])
 
     def index_of(self, fp: str) -> int:
-        """Which of this wallet's keys has fingerprint fp (searching from the hint)."""
+        """Which of this wallet's keys has fingerprint fp, searching outward from the hint.
+
+        The hint runs ahead of the ledger when a signed tx was refused (the key
+        it used is still current), so look back as well as forward, nearest first.
+        """
         start = self.next_index
-        for i in list(range(start, start + MAX_KEY_SEARCH)) + list(range(0, start)):
-            if self.key_fp(i) == fp:
-                return i
+        for d in range(MAX_KEY_SEARCH):
+            for i in (start - d, start + d) if d else (start,):
+                if i >= 0 and self.key_fp(i) == fp:
+                    return i
         raise ValueError(f"wallet {self.name}: no key matches the ledger's current key")
 
     @property
