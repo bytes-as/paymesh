@@ -19,7 +19,6 @@ PRICES_MAP: dict = {}
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>paymesh explorer</title>
-<meta http-equiv="refresh" content="2">
 <style>
 body{font-family:Consolas,monospace;background:#0d1117;color:#c9d1d9;margin:24px}
 h1{color:#58a6ff} h2{color:#8b949e;border-bottom:1px solid #30363d;padding-bottom:4px}
@@ -45,9 +44,12 @@ code{color:#ffa657}
 <h2>wallet balances</h2>
 <table id="bal"><tr><th>wallet</th><th>address</th><th>balance PMX</th></tr></table>
 <script>
-const data = DATA;
+const initial = DATA;
 const ESC = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
 const esc = s => String(s).replace(/[&<>"']/g, ch => ESC[ch]);
+function clear(id){[...document.querySelectorAll('#'+id+' tr')].slice(1).forEach(r=>r.remove())}  // keep the header row
+function render(data){
+['rev','chans','chain','txs','prices','bal'].forEach(clear);document.getElementById('stats').innerHTML='';
 const st = document.getElementById('stats');
 data.stats.forEach(([k,v])=>st.insertAdjacentHTML('beforeend', `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`));
 const rv = document.getElementById('rev');
@@ -69,6 +71,10 @@ Object.entries(data.prices||{}).forEach(([r,v])=>{
 const b = document.getElementById('bal');
 Object.entries(data.balances).forEach(([a,v])=>{
   b.insertAdjacentHTML('beforeend', `<tr><td>${esc(data.names[a]||'?')}</td><td><code>${a.slice(0,16)}..</code></td><td class="ok">${v}</td></tr>`)});
+}
+render(initial);
+// live: fetch the data every 2 s and redraw the tables (no page reload, scroll kept)
+setInterval(()=>fetch('/data.json').then(r=>r.json()).then(render).catch(()=>{}),2000);
 </script>
 </body></html>"""
 
@@ -101,13 +107,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "balances": chain_inst.balances(),
                     "prices": PRICES_MAP,
                     "names": names, "revenue": _revenue()}
+            if self.path.startswith("/data.json"):
+                self._send(200, json.dumps(data), "application/json")
+                return
             # "<" escaped so no value (a memo) can close the <script> it sits in
             self._send(200, PAGE.replace("DATA", json.dumps(data).replace("<", "\\u003c")))
 
-    def _send(self, code, body):
+    def _send(self, code, body, ctype="text/html; charset=utf-8"):
         body = body.encode()
         self.send_response(code)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
