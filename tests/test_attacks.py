@@ -14,6 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import chain as ch  # noqa: E402
+import durable  # noqa: E402
 import paywall  # noqa: E402
 import wallets  # noqa: E402
 
@@ -30,6 +31,7 @@ class Scratch(unittest.TestCase):
 
     def tearDown(self):
         wallets.WALLET_DIR = self._wd
+        durable.close_all()  # channel logs fsync in the background: close them before deleting
         self.tmp.cleanup()
 
     def funded(self, name, amount):

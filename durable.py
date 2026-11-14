@@ -13,6 +13,7 @@ clean line. Stdlib only.
 """
 import os
 import threading
+import weakref
 
 POLICY = os.environ.get("PAYMESH_FSYNC", "safe")
 if POLICY not in ("safe", "strict", "off"):
@@ -74,6 +75,15 @@ def repair_tail(path: str, line_ok) -> int:
         return size - start
 
 
+_logs: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def close_all():
+    """Close every open log (a last fsync, flusher stopped): before deleting their folder."""
+    for log in list(_logs):
+        log.close()
+
+
 class AppendLog:
     """A line log. append() returns once the line is with the OS (it survives a killed
     process). Critical logs fsync each line; others are fsynced by a background thread
@@ -86,6 +96,7 @@ class AppendLog:
         self.lock = threading.Lock()
         self.dirty = False
         self.closed = threading.Event()
+        _logs.add(self)
         if not self.sync_each and POLICY == "safe":
             threading.Thread(target=self._flusher, daemon=True).start()
 

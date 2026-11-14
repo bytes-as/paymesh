@@ -30,6 +30,7 @@ class TornTail(unittest.TestCase):
 
     def tearDown(self):
         wallets.WALLET_DIR = self._wd
+        durable.close_all()
         self.tmp.cleanup()
 
     def chain_file(self, blocks=4):
