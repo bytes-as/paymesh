@@ -51,8 +51,10 @@ minutes. It also signs with hash-based one-time keys (WOTS, the
 building block of SPHINCS+), a kind of signature believed to resist quantum computers; this
 implementation has not been audited. The parts that matter for agents don't depend on that chain: the
 x402 scheme, payment channels, the hub with its payouts, the facilitator and the clients. The
-next step is to settle channel opens, payouts and closes on a public chain (an EVM contract
-holding USDC) and keep everything else as it is. What it is not: there is no consensus. The
+next step is to settle channel opens, payouts and closes on NEAR: a contract holds each
+deposit (NEAR or USDC on NEAR) and releases it against the same hash-chain words and payout
+records the ledger checks today, while payments themselves stay off-chain. That part is not
+built yet. What it is not: there is no consensus. The
 single node mines alone, "mining" is light block hashing, and PMX is play money from a faucet.
 
 | who | trusts | protected by |
