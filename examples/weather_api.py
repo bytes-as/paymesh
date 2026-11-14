@@ -42,7 +42,7 @@ def build(node: str, wallet: str = "weather-seller"):
 
 
 if __name__ == "__main__":
-    node = os.environ.get("PAYMESH_API", "http://127.0.0.1:8402")
+    node = os.environ.get("PAYMESH_API") or f"http://127.0.0.1:{os.environ.get('PAYMESH_API_PORT', 8402)}"
     port = int(os.environ.get("WEATHER_PORT", 8404))
     _, app = build(node)
     httpd = make_server("127.0.0.1", port, app, server_class=ThreadingWSGIServer)
