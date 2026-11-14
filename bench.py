@@ -88,6 +88,36 @@ def run(n_chain: int, n_chan: int):
                           "paid_to_seller": settled["paid_to_seller"],
                           "chain_bytes_per_call": (chain_bytes() - b0) // n_chan}
         out["speedup"] = round(out["channel"]["calls_per_s"] / out["on_chain"]["calls_per_s"], 1)
+
+        # many agents at once, each with its own wallet and channel
+        import threading
+        agents, per = 8, max(50, n_chan // 4)
+        clients = []
+        for k in range(agents):
+            a = Client(url, f"agent{k}")
+            for _ in range(per * 5 // 100 + 1):
+                a.faucet()
+            a.open_channel(ticks=per * 5)
+            a.get("/premium/price")
+            clients.append(a)
+        errors = []
+
+        def work(a):
+            try:
+                for _ in range(per - 1):
+                    assert a.get("/premium/price")[0] == 200
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+        threads = [threading.Thread(target=work, args=(a,)) for a in clients]
+        t0 = time.perf_counter()
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        dt = time.perf_counter() - t0
+        settled = sum(a.close_channel()["paid_to_seller"] for a in clients)
+        out["parallel_channels"] = {"agents": agents, "calls": agents * (per - 1), "calls_per_s": round(agents * (per - 1) / dt, 1),
+                                    "errors": len(errors), "paid_to_seller": settled}
         return out
     finally:
         srv.kill()
