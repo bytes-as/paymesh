@@ -35,6 +35,20 @@ api.close_channel()                       # settle; the unspent rest comes back
 The client learns each route's price from its first 402, keeps one HTTP
 connection alive, and saves its channel so it can resume after a restart.
 
+## Charge for your own API
+
+```python
+from paymesh_seller import Paywall
+paywall = Paywall(node="http://127.0.0.1:8402", wallet="my-shop", prices={"/forecast": 3})
+app = paywall.wsgi(my_wsgi_app)   # or, in any framework: ok, status, body = paywall.check(path, headers)
+```
+
+The seller runs apart from the node: it keeps its own wallet, challenges and
+channel log, asks the node only to look up mined txs and channels, and
+settles channels itself. A buyer points the client at both:
+`Client("http://127.0.0.1:8404", wallet="me", node="http://127.0.0.1:8402")`.
+Runnable example: `py -3 examples/weather_api.py`.
+
 ## Numbers
 
 `py -3 bench.py 100 2000`, on a separate server (never the live one), this machine:
@@ -52,8 +66,8 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (37 tests: attacks, channels, HTTP end
-to end, client SDK, seeded fuzzing).
+`py -3 -m unittest discover -s tests` (39 tests: attacks, channels, HTTP end
+to end, client SDK, a separate seller API, seeded fuzzing).
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
   extended into a forgery; a spent key never verifies again.
@@ -97,6 +111,9 @@ to end, client SDK, seeded fuzzing).
 | `paywall.py` | 402 challenges and on-chain payment checks |
 | `server.py` | demo paid API: prices, `/tx`, `/account`, `/faucet`, `/stats`, channel routes, miner, rate limits |
 | `paymesh_client.py` | client SDK |
+| `paymesh_seller.py` | seller middleware: price any WSGI app, apart from the node |
+| `wallet.py` | wallet command line: new, balance, faucet, send, history, channels |
+| `examples/weather_api.py` | a separate API charging 3 PMX per call |
 | `buyer_agent.py` | demo agent |
 | `explorer.py` | dashboard on :8403 |
 | `paymesh.py` | launcher: run / start / stop / status |

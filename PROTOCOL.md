@@ -60,6 +60,8 @@ spent; a txid pays once. Challenges live 300 s; at most 10,000 are open.
 | `GET /account?address=<addr>` | `{"balance", "current_key", "height", "channels"}`: what a client needs to sign its next tx |
 | `GET /faucet?address=<addr>` | mints 100 PMX to `addr` (demo only); `?name=` creates a wallet on the server's machine |
 | `POST /tx` | submit a signed tx (body up to 200 KB); `400 {"error"}` if any rule fails. Faucet txs are refused here. |
+| `GET /tx?id=<txid>` | a mined tx (without its signature) and its block: for sellers running apart from the node |
+| `GET /channel/info?id=<channel>` | a channel's terms and state: for sellers running apart from the node |
 | `GET /stats` | paid calls and PMX per route, on-chain / channel, distinct payers |
 | any of `/faucet`, `/tx`, a 402 challenge | `429 {"error": "too many requests", "retry_after_s"}` with `Retry-After` when a client is over its limit |
 
