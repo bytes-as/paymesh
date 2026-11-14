@@ -213,8 +213,9 @@ class PayoutFuzz(unittest.TestCase):
             except ValueError:  # nothing ever paid on it: the buyer refunds
                 while self.c.height < self.c.ledger.channels[cid]["expires"]:
                     self.c.mine()
-                for _ in range(2):
-                    self.mine_with(channels.refund_tx(self.c, self.model[cid]["buyer"], cid))
+                for _ in range(2):  # request + claim (or only the claim, if it was requested before)
+                    if self.c.ledger.channels[cid]["open"]:
+                        self.mine_with(channels.refund_tx(self.c, self.model[cid]["buyer"], cid))
             self.check()
         self.assertEqual(self.open_channels(), [])
         self.assertTrue(ch.Chain(self.path).valid()[0])
