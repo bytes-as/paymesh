@@ -1,6 +1,6 @@
 """QA findings: each test reproduces one bug found by QA. A known open bug is marked
 expectedFailure so the suite stays green; when the fix lands the test reports an
-"unexpected success": then drop the decorator. QA-PM-1 and QA-PM-2 are fixed. Scratch node only (temp dir, free port)."""
+"unexpected success": then drop the decorator. QA-PM-1, -2 and -3 are fixed. Scratch node only (temp dir, free port)."""
 import http.client
 import os
 import sys
@@ -150,7 +150,6 @@ class QARemoteSeller(unittest.TestCase):
     # QA-PM-3: QA-PM-2b's race against a remote seller. Pay just outside STOP_WITHIN, mine
     # past `expires` with faucet calls (one block each), refund: the node settles first only
     # for its own seller, the remote seller's settler polls every 2 s and loses.
-    @unittest.expectedFailure
     def test_qa_pm_3_remote_seller_refund_race(self):
         cl = Client(self.node, "qa-remote-racer")
         cl.faucet()

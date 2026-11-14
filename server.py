@@ -30,6 +30,7 @@ PRICES = {"/open/info": 0, "/premium/price": 5, "/premium/history": 20}
 MAX_TX_BYTES = 200_000  # a signed tx is ~50 KB (Lamport pub + sig)
 CHANNEL_UNIT = 1  # PMX per channel tick
 SETTLE_WITHIN = 20  # settle a paid channel when it expires within this many blocks
+REFUND_HOLD_S = float(os.environ.get("PAYMESH_REFUND_HOLD_S", 6.0))  # > 2 polls of a separate seller's settler
 
 # simulated feed: some seeded history so /premium/history returns real data
 price_history = [{"t": i, "price": round(100.0 + random.random() * 10, 4)} for i in range(12)]
@@ -354,14 +355,20 @@ def submit_and_wait(tx) -> "chain.Block":
     if tx.get("from_wallet") == chain.FAUCET:
         raise ValueError("faucet mints come from GET /faucet only")
     cid = tx.get("channel")
-    if tx.get("kind") == "channel_refund" and isinstance(cid, str) and BOOK.best(cid):
+    c = chain_inst.ledger.channels.get(cid) if tx.get("kind") == "channel_refund" and isinstance(cid, str) else None
+    if c and c["open"] and c["seller"] == SELLER.address and BOOK.best(cid):
         # this node is the seller and the miner: settle what the buyer spent before a refund can take it back
-        c = chain_inst.ledger.channels.get(cid)
-        if c and c["open"]:
-            try:
-                settle(cid)
-            except ValueError as e:
-                print(f"[api] settle {cid[:12]} before refund failed: {e}")
+        try:
+            settle(cid)
+        except ValueError as e:
+            print(f"[api] settle {cid[:12]} before refund failed: {e}")
+    elif c and c["open"] and c["seller"] != SELLER.address:
+        # a seller running apart can't front-run (blocks are cheap: a buyer can mine past its
+        # 2 s settler). Hold the refund so it can settle first; whichever lands first counts.
+        deadline = time.monotonic() + REFUND_HOLD_S
+        while time.monotonic() < deadline and chain_inst.ledger.channels.get(cid, {}).get("open"):
+            with mined:
+                mined.wait(0.1)
     try:
         with chain_lock:
             chain_inst.add_tx(tx)  # raises on any broken ledger rule

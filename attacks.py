@@ -161,6 +161,47 @@ def run(node: str, restart=None) -> list:
             lambda c, b: served > 0 and b.get("paid") == served * 5)
     attempt("wallet name that escapes the wallet folder", lambda: me._node("/faucet?name=../../evil"), no)
     attempt("malformed JSON body", lambda: raw_post(node, "/tx", b"{"), lambda c, b: c == 400)
+    # the same race against a seller running apart from the node (examples/weather_api.py)
+    sys.path.insert(0, os.path.join(HERE, "examples"))
+    import threading
+    from wsgiref.simple_server import WSGIRequestHandler, make_server
+    import weather_api
+
+    class Quiet(WSGIRequestHandler):
+        def log_message(self, *a):
+            pass
+    shop, app = weather_api.build(node)
+    sport = _free_port()
+    httpd = make_server("127.0.0.1", sport, app, server_class=weather_api.ThreadingWSGIServer, handler_class=Quiet)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        bc = chn.BuyerChannel(30)
+        led = victim._ledger()
+        t = led.new_tx(victim.wallet.address, shop.wallet.address, 30, "channel:open")
+        exp = height() + chn.SellerBook.STOP_WITHIN + 3
+        t.update(kind="channel_open", anchor=bc.anchor, ticks=30, unit=1, expires=exp)
+        wallets.sign_tx(t, victim.wallet, led)
+        post(t)
+        bc.id = t["txid"]
+        shop_api = Client(f"http://127.0.0.1:{sport}", "attacker", node=node)
+        served_far = [shop_api._req("/forecast", headers={"X-Channel": bc.pay(3)})[0] for _ in range(3)].count(200)
+        while height() < exp:
+            me._node(f"/faucet?address={'ee' * 32}")
+
+        def refund_far():
+            led = victim._ledger()
+            t = led.new_tx(victim.wallet.address, victim.wallet.address, 30, "channel:refund")
+            t.update(kind="channel_refund", channel=bc.id)
+            wallets.sign_tx(t, victim.wallet, led)
+            post(t)
+            return 200, me._node(f"/channel/info?id={bc.id}")[1]
+        attempt("the same refund race against a seller running apart from the node", refund_far,
+                lambda c, b: served_far > 0 and b.get("paid") == served_far * 3)
+    finally:
+        shop.stop.set()
+        httpd.shutdown()
+        httpd.server_close()
+
     if restart:  # the seller logs a tick before it serves: a crash can't make a word new again
         h = me.channel.pay(5)
         first = me._req("/premium/price", headers={"X-Channel": h})[0]
