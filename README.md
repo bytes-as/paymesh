@@ -34,6 +34,11 @@ api.last_receipt()                        # the PAYMENT-RESPONSE: success, txid,
 api.open_channel(ticks=500)               # lock 500 PMX once
 status, data = api.get("/premium/price")  # now paid from the channel
 api.close_channel()                       # settle; the unspent rest comes back
+
+api.open_hub(ticks=500)                   # or: one deposit with the node's hub...
+api.get("/premium/price")                 # ...pays this API
+api.get("http://127.0.0.1:8404/forecast") # ...and any other seller on that node
+api.close_channel()                       # one tx pays every seller its share
 ```
 
 The client learns each route's price from its first 402, keeps one HTTP
@@ -70,9 +75,9 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (72 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (78 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
-`py -3 attacks.py` runs 29 attacks against a scratch node and shows each refused.
+`py -3 attacks.py` runs 32 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
@@ -91,6 +96,10 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
   a signed tx, the client retires that key (a self-payment via the node) before
   signing again; the kept tx can no longer be mined. (With a balance of 0 it
   can't, and says so: fund the wallet before paying again.)
+* **One hub deposit pays many sellers, each word once.** The hub keeps one
+  counter per channel: a word spent at one seller is refused at every other,
+  and the hub's single close pays each seller exactly what it was credited
+  (the ledger checks the splits add up to what the buyer revealed).
 * **Channel money is safe.** The seller can only claim ticks the buyer
   revealed; signed channel terms can't be altered; an unsettled channel
   refunds to the buyer after expiry, and the server settles paid channels

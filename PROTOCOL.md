@@ -29,7 +29,7 @@ both settle before the resource runs, so `extra.paymentFlow` is `upfront` (spec 
    "payTo": "<seller address>", "maxTimeoutSeconds": 300,
    "extra": {"assetTransferMethod": "tx", "paymentFlow": "upfront", "memo": "<challenge memo>", "nonce": "<32 hex>"}},
   {"scheme": "paymesh", ..., "extra": {"assetTransferMethod": "channel", "paymentFlow": "upfront",
-   "unit": 1, "terms": "/channel/terms"}}]}
+   "unit": 1, "terms": "/channel/terms", "hub": "<hub address: its channels pay here too>"}}]}
 ```
 
 `PaymentPayload.payload` by method:
@@ -117,6 +117,40 @@ spent; a txid pays once. Challenges live 300 s; at most 10,000 are open.
    on it, and otherwise holds the refund up to 6 s (`PAYMESH_REFUND_HOLD_S`) so
    a seller running apart can settle first. Whichever is mined first counts.
 
+### 1c. Hub channel (one deposit, any seller)
+
+The node runs a hub with its own wallet. A buyer opens one channel to the hub
+(`GET /hub/terms` → `{"hub", "unit", ...}`, then a `channel_open` with
+`to_wallet` = hub) and pays any seller that takes hub channels. These are the
+node's own API, and every `paymesh_seller` pointed at that node; their 402 names
+the hub in `extra.hub`. The words are those of 1b, sent to whichever seller is
+being paid:
+
+1. The seller sees that the channel's seller is the hub and hands the word over:
+   `POST /hub/claim {"channel", "tick", "word", "seller": <its address>, "price"}`.
+2. The hub checks the word exactly as in 1b, with one counter per channel, and
+   appends `<channel> <i> <word> <seller> <PMX>` to its log in one line. Then it
+   answers `200`; only then does the seller serve. A word already used at one
+   seller is refused at every other (`402`, "not after the last paid tick").
+3. The hub settles with one `channel_close` (section 3) carrying
+   `splits: {seller: PMX, ...}`. The ledger requires the splits to add up to
+   `ticks * unit` and pays each seller its share in that tx; the rest goes back
+   to the buyer. `POST /channel/close {channel}` at the node closes a hub
+   channel. The expiry rules of 1b apply: no ticks within 20 blocks of expiry,
+   and the hub settles before a refund.
+
+Trust: a seller is paid at the close, by the hub's signature over the splits.
+Until then it trusts the hub (here: the node, which is also the only miner) to
+keep its credit. The buyer trusts nothing new: the hub can only claim words
+the buyer revealed.
+
+Cost, measured on this machine (400 sequential calls; the machine was noisy):
+at the node's own API a hub channel ran 694–1,085 calls/s against a direct
+channel's 872–1,532 calls/s. At a seller running apart, each call adds one
+kept-alive round trip to the hub: p50 4.6 ms against 2.7 ms for a direct
+channel to that seller (155 against 319 calls/s; most of the base cost is
+`wsgiref`).
+
 ## 2. Other endpoints
 
 | method and path | answer |
@@ -128,6 +162,8 @@ spent; a txid pays once. Challenges live 300 s; at most 10,000 are open.
 | `POST /tx` | submit a signed tx (body up to 200 KB); `400 {"error"}` if any rule fails. Faucet txs are refused here. |
 | `GET /tx?id=<txid>` | a mined tx (without its signature) and its block: for sellers running apart from the node |
 | `GET /channel/info?id=<channel>` | a channel's terms and state: for sellers running apart from the node |
+| `GET /hub/terms` | `{"hub", "unit", "max_ticks", ...}`: open a channel to `hub` to pay any seller (1c) |
+| `POST /hub/claim` | a seller's claim of a hub channel word: `200 {"ok"}` or `402 {"reason"}` (1c) |
 | `GET /stats` | paid calls and PMX per route, on-chain / channel, distinct payers |
 | any of `/faucet`, `/tx`, a 402 challenge | `429 {"error": "too many requests", "retry_after_s"}` with `Retry-After` when a client is over its limit |
 
@@ -143,7 +179,7 @@ the data folder).
  "kind": "pay | channel_open | channel_close | channel_refund",
  "sig": ["<64 hex>", ...], "pub": [...Lamport only...],
  "anchor", "ticks", "unit", "expires"   // channel_open
- "channel", "ticks", "word"             // channel_close / channel_refund (channel only)
+ "channel", "ticks", "word", "splits"   // channel_close (splits optional) / channel_refund (channel only)
 }
 ```
 
@@ -154,7 +190,7 @@ when `chain.json` is loaded:
 * a txid is used once;
 * `pay`: signed by the sender's current key; the sender holds the amount (pending txs counted);
 * `channel_open`: `amount == ticks * unit`, `1 <= ticks <= 1,000,000`, `expires` in the future, funds held;
-* `channel_close`: from the channel's seller to its buyer, `amount == ticks * unit`, `sha256^ticks(word) == anchor`, signed by the seller;
+* `channel_close`: from the channel's seller to its buyer, `amount == ticks * unit`, `sha256^ticks(word) == anchor`, signed by the seller; optional `splits` `{address: PMX}` (1..64 payees, whole PMX above 0, adding up to `amount`) pays those addresses instead of the seller (a hub paying its sellers); the signature covers it;
 * `channel_refund`: from the buyer to itself for the whole deposit, from the `expires` height on;
 * the faucet (address `0` x 64) mints at most 100 PMX per tx, only through `GET /faucet`.
 * a tx carries only its kind's fields (above); anything else is refused.
