@@ -23,7 +23,7 @@ import chain
 import channels
 import paywall
 import wallets
-
+import paymesh_x402 as x402
 HOST, PORT = "127.0.0.1", int(os.environ.get("PAYMESH_API_PORT", 8402))
 CURRENCY = "PMX"
 PRICES = {"/open/info": 0, "/premium/price": 5, "/premium/history": 20}
@@ -101,6 +101,7 @@ LIMITS = RateLimit({"faucet": _limit("faucet", 200, 2), "tx": _limit("tx", 2000,
 chain_inst: chain.Chain
 SELLER: wallets.Wallet
 BOOK: channels.SellerBook
+NETWORK = ""  # x402 network id, set by start() from the genesis hash
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -119,7 +120,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         if price == 0:
             return True  # free route: no 402, no payment
-        chan = self.headers.get("X-Channel")
+        refused = None
+        sig = self.headers.get(x402.SIGNATURE)
+        if sig is not None:  # x402 v2: PAYMENT-SIGNATURE in, PAYMENT-RESPONSE out
+            status, resp, method = x402.settle(sig, network=NETWORK, pay_to=SELLER.address, price=price, path=path,
+                                               chain_=chain_inst, book=BOOK, submit=submit_and_wait, lock=chain_lock)
+            self.pay_headers = [(x402.RESPONSE, x402.encode(resp))]
+            if status == 200:
+                self.paid_reason = f"x402 {method}: {price} PMX" + (f", tx {resp['transaction'][:16]}" if resp["transaction"] else "")
+                STATS.record(path, "channel" if method == "channel" else "on_chain", price, resp.get("payer") or "?")
+                return True
+            if status == 400:
+                self._send(400, {"error": "invalid payment", "reason": resp["errorReason"], "message": resp.get("errorMessage", "")})
+                return False
+            refused = resp
+        chan = None if sig is not None else self.headers.get("X-Channel")
         if chan:  # paid from an open payment channel: no tx, a few hashes
             ok, reason = BOOK.accept(chain_inst, chan, price)
             if ok:
@@ -128,33 +143,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return True
             self._send(402, {"error": "channel payment refused", "reason": reason, "amount": price, "currency": CURRENCY})
             return False
-        with chain_lock:
-            ok, reason = paywall.verify_payment(chain_inst, self.headers, path)
-        if ok:
-            self.paid_reason = reason
-            tx, _ = chain_inst.find_tx_by_id(self.headers.get("X-Payment", "").strip())
-            STATS.record(path, "on_chain", price, tx["from_wallet"] if tx else "?")
-            return True
+        if sig is None:  # legacy: X-Payment: <txid of a mined tx>
+            with chain_lock:
+                ok, reason = paywall.verify_payment(chain_inst, self.headers, path)
+            if ok:
+                self.paid_reason = reason
+                tx, _ = chain_inst.find_tx_by_id(self.headers.get("X-Payment", "").strip())
+                STATS.record(path, "on_chain", price, tx["from_wallet"] if tx else "?")
+                return True
         if self._limited("challenge"):
             return False
         ch = paywall.open_challenge(chain_inst, SELLER.address, price, path)
         ch["channel"] = _terms()  # or: open a channel once and pay calls with X-Channel
+        if refused:
+            ch["error"] = f"payment refused: {refused.get('errorMessage', refused['errorReason'])}"
+        host = self.headers.get("Host") or f"{HOST}:{PORT}"
+        required = x402.payment_required(f"http://{host}{path}", x402.paymesh_accepts(NETWORK, SELLER.address, price, ch, CHANNEL_UNIT),
+                                         error=ch["error"] if refused else "PAYMENT-SIGNATURE header is required")
         body = json.dumps(ch).encode()
         self.send_response(402)  # Payment Required
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Payment-Challenge", "true")
+        self.send_header(x402.REQUIRED, x402.encode(required))
+        for k, v in self.pay_headers:
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
         print(f"[api] 402 challenged {path} nonce={ch['nonce'][:12]} amount={price}")
         return False
 
     def do_GET(self):
+        self.pay_headers = []  # x402 headers for this response (the handler lives across keep-alive requests)
         if self.path.startswith("/health"):
             if chain_inst.corrupt:
                 self._send(503, {"status": "integrity check failed", "reason": chain_inst.corrupt})
             else:
-                self._send(200, {"status": "ok", "chain_blocks": len(chain_inst.blocks)})
+                self._send(200, {"status": "ok", "chain_blocks": len(chain_inst.blocks), "network": NETWORK})
             return
         if self.path.startswith("/faucet") and self._limited("faucet"):
             return
@@ -255,6 +280,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        self.pay_headers = []
         if self.path.startswith("/tx") and self._limited("tx"):
             return
         if self.path.startswith("/tx"):
@@ -265,22 +291,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.close_connection = True  # the unread body must not become the next request
                     raise ValueError(f"body must be 1..{MAX_TX_BYTES} bytes")
                 tx = json.loads(self.rfile.read(length).decode())
-                if isinstance(tx, dict) and tx.get("from_wallet") == chain.FAUCET:
-                    raise ValueError("faucet mints come from GET /faucet only")
-                with chain_lock:
-                    chain_inst.add_tx(tx)  # raises on any broken ledger rule
-                # the miner thread puts every waiting tx into its next block
-                with mined:
-                    mined.notify_all()
-                    if not mined.wait_for(lambda: tx["txid"] in chain_inst.where, timeout=15):
-                        raise ValueError("not mined in time; it stays pending")
-                blk = chain_inst.blocks[chain_inst.where[tx["txid"]]]
+                blk = submit_and_wait(tx)
             except (ValueError, UnicodeDecodeError) as e:  # JSONDecodeError is a ValueError
                 self._send(400, {"error": f"tx rejected: {e}"})
-                return
-            except Exception as e:  # noqa: BLE001 - a malformed tx must get 400, never kill the request
-                print(f"[api] unexpected {type(e).__name__} on /tx: {e}")
-                self._send(400, {"error": "tx rejected: malformed"})
                 return
             self._send(200, {"accepted": True, "txid": tx["txid"], "block": blk.index})
             print(f"[api] tx {tx['txid'][:16]}.. mined in block {blk.index}")
@@ -322,6 +335,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for k, v in getattr(self, "pay_headers", ()):
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -330,6 +345,28 @@ def _terms() -> dict:
     return {"seller": SELLER.address, "unit": CHANNEL_UNIT, "currency": CURRENCY,
             "max_ticks": chain.MAX_TICKS, "open": "POST /tx a signed channel_open (see channels.py)",
             "pay": "X-Channel: <channel id> <tick> <word>", "close": "POST /channel/close {channel}"}
+
+
+def submit_and_wait(tx) -> "chain.Block":
+    """Put a signed tx on chain and wait until it is mined. ValueError if any rule refuses it."""
+    if not isinstance(tx, dict):
+        raise ValueError("a tx is a JSON object")
+    if tx.get("from_wallet") == chain.FAUCET:
+        raise ValueError("faucet mints come from GET /faucet only")
+    try:
+        with chain_lock:
+            chain_inst.add_tx(tx)  # raises on any broken ledger rule
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001 - a malformed tx is refused, never kills the request
+        print(f"[api] unexpected {type(e).__name__} on a tx: {e}")
+        raise ValueError("malformed") from None
+    # the miner thread puts every waiting tx into its next block
+    with mined:
+        mined.notify_all()
+        if not mined.wait_for(lambda: tx["txid"] in chain_inst.where, timeout=15):
+            raise ValueError("not mined in time; it stays pending")
+    return chain_inst.blocks[chain_inst.where[tx["txid"]]]
 
 
 def settle(cid: str):
@@ -369,8 +406,9 @@ def _settler(stop: threading.Event):
 
 
 def start(chain_: chain.Chain, port=PORT) -> http.server.ThreadingHTTPServer:
-    global chain_inst, SELLER, BOOK
+    global chain_inst, SELLER, BOOK, NETWORK
     chain_inst = chain_
+    NETWORK = x402.network_id(chain_.blocks[0].hash())
     SELLER = wallets.load_or_create("seller")
     BOOK = channels.SellerBook(os.path.join(os.path.dirname(os.path.abspath(chain_.path)), "seller_channels.json"), SELLER.address)
     httpd = http.server.ThreadingHTTPServer((HOST, port), Handler)

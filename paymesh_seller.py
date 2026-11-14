@@ -23,8 +23,7 @@ import urllib.parse
 import channels
 import paywall as _pw
 import wallets
-
-
+import paymesh_x402 as x402
 class _Node:
     """Just enough of a chain for paywall.py and channels.py, read from the node over HTTP."""
 
@@ -65,6 +64,23 @@ class _Node:
             return r.status, json.loads(r.read().decode() or "null")
         finally:
             c.close()
+
+    @property
+    def network(self) -> str:
+        """The node's x402 network id (from its genesis hash), asked once."""
+        if not getattr(self, "_network", ""):
+            code, body = self._get("/health")
+            if code != 200 or not isinstance(body, dict) or not body.get("network"):
+                raise ValueError(f"node has no x402 network id: {body}")
+            self._network = body["network"]
+        return self._network
+
+    def submit(self, tx):
+        """x402 settlement: put the buyer's signed tx on chain through the node."""
+        code, res = self.post("/tx", tx)
+        if code != 200:
+            raise ValueError(str((res or {}).get("error", res)) if isinstance(res, dict) else str(res))
+        return res
 
     # chain-like API used by paywall.verify_payment
     @property
@@ -128,24 +144,49 @@ class Paywall:
                 "pay": "X-Channel: <channel id> <tick> <word>", "close": "POST /channel/close {channel}"}
 
     def check(self, path: str, headers) -> tuple[bool, int, dict | None]:
-        """(True, 200, None) if the call may proceed; else (False, status, json body to send)."""
+        """(True, 200, None) if the call may proceed; else (False, status, json body to send).
+        Drops the x402 response headers: use gate() to send them."""
+        ok, status, body, _ = self.gate(path, headers)
+        return ok, status, body
+
+    def gate(self, path: str, headers, url: str = "") -> tuple[bool, int, dict | None, list]:
+        """Like check(), plus the headers to send: PAYMENT-REQUIRED on a 402, PAYMENT-RESPONSE
+        once an x402 payment was tried. `url` is the resource URL quoted in PAYMENT-REQUIRED."""
         price = self.prices.get(path)
         if price is None or price == 0:
-            return True, 200, None
-        chan = headers.get("X-Channel")
-        if chan:
-            ok, reason = self.book.accept(self.node, chan, price)
-            if ok:
-                return True, 200, None
-            return False, 402, {"error": "channel payment refused", "reason": reason, "amount": price, "currency": "PMX"}
-        if headers.get("X-Payment"):
-            ok, reason = _pw.verify_payment(self.node, headers, path)
-            if ok:
-                return True, 200, None
+            return True, 200, None, []
+        out, refused = [], None
+        sig = headers.get(x402.SIGNATURE)
+        if sig is not None:
+            status, resp, _ = x402.settle(sig, network=self.node.network, pay_to=self.wallet.address, price=price,
+                                          path=path, chain_=self.node, book=self.book, submit=self.node.submit)
+            out = [(x402.RESPONSE, x402.encode(resp))]
+            if status == 200:
+                return True, 200, None, out
+            if status == 400:
+                return False, 400, {"error": "invalid payment", "reason": resp["errorReason"],
+                                    "message": resp.get("errorMessage", "")}, out
+            refused = resp
+        else:
+            chan = headers.get("X-Channel")
+            if chan:
+                ok, reason = self.book.accept(self.node, chan, price)
+                if ok:
+                    return True, 200, None, []
+                return False, 402, {"error": "channel payment refused", "reason": reason, "amount": price, "currency": "PMX"}, []
+            if headers.get("X-Payment"):
+                ok, reason = _pw.verify_payment(self.node, headers, path)
+                if ok:
+                    return True, 200, None, []
         body = _pw.open_challenge(self.node, self.wallet.address, price, path)
         body["channel"] = self.terms()
         body["node"] = self.node.url  # where to send the tx
-        return False, 402, body
+        if refused:
+            body["error"] = f"payment refused: {refused.get('errorMessage', refused['errorReason'])}"
+        required = x402.payment_required(url or path, x402.paymesh_accepts(self.node.network, self.wallet.address, price,
+                                                                             body, self.unit, node=self.node.url),
+                                         error=body["error"] if refused else "PAYMENT-SIGNATURE header is required")
+        return False, 402, body, out + [(x402.REQUIRED, x402.encode(required))]
 
     def settle(self, cid: str) -> dict:
         signer = _Signer(self.node, self.wallet.address)
@@ -179,8 +220,9 @@ class Paywall:
     def wsgi(self, app):
         def wrapped(environ, start_response):
             path = environ.get("PATH_INFO", "/")
-            headers = {"X-Channel": environ.get("HTTP_X_CHANNEL"), "X-Payment": environ.get("HTTP_X_PAYMENT")}
-            headers = {k: v for k, v in headers.items() if v}
+            headers = {"X-Channel": environ.get("HTTP_X_CHANNEL"), "X-Payment": environ.get("HTTP_X_PAYMENT"),
+                       x402.SIGNATURE: environ.get("HTTP_PAYMENT_SIGNATURE")}
+            headers = {k: v for k, v in headers.items() if v is not None and (v or k == x402.SIGNATURE)}
             if path == "/channel/terms":
                 return _json(start_response, 200, self.terms())
             if path == "/channel/state":
@@ -199,10 +241,16 @@ class Paywall:
                     return _json(start_response, 200, self.settle(cid))
                 except (ValueError, AttributeError) as e:
                     return _json(start_response, 400, {"error": f"close refused: {e}"})
-            ok, status, body = self.check(path, _H(headers))
+            url = f"{environ.get('wsgi.url_scheme', 'http')}://{environ.get('HTTP_HOST', 'localhost')}{path}"
+            ok, status, body, extra = self.gate(path, _H(headers), url)
             if not ok:
-                return _json(start_response, status, body)
-            return app(environ, start_response)
+                return _json(start_response, status, body, extra)
+            if not extra:
+                return app(environ, start_response)
+
+            def start_with_receipt(status_line, hdrs, exc_info=None):  # PAYMENT-RESPONSE on the paid answer
+                return start_response(status_line, list(hdrs) + extra, exc_info)
+            return app(environ, start_with_receipt)
         return wrapped
 
 
@@ -218,8 +266,9 @@ def _new_close(seller, c, cid, b):
     return tx
 
 
-def _json(start_response, status, obj):
+def _json(start_response, status, obj, extra=()):
     body = json.dumps(obj).encode()
     reason = {200: "OK", 400: "Bad Request", 402: "Payment Required", 404: "Not Found"}.get(status, "")
-    start_response(f"{status} {reason}", [("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+    start_response(f"{status} {reason}", [("Content-Type", "application/json"), ("Content-Length", str(len(body)))]
+                   + list(extra))
     return [body]

@@ -96,6 +96,57 @@ class Fuzz(unittest.TestCase):
             self.assertEqual(code, 402, h[:20])
         self.assertEqual(self.c._req("/health")[0], 200)
 
+    def test_mutated_x402_payment_signatures_are_refused(self):
+        import base64
+        import paymesh_x402 as x402
+        rng = random.Random(4022)
+        self.c.faucet()
+        code, _ = self.c._req("/premium/price")
+        offers = self.c._offers("/premium/price")
+        led = self.c._ledger()
+        tx = led.new_tx(self.c.wallet.address, offers["tx"]["payTo"], 5, offers["tx"]["extra"]["memo"])
+        wallets.sign_tx(tx, self.c.wallet, led)
+        good = [{"x402Version": 2, "accepted": offers["tx"], "payload": {"transaction": tx}},
+                {"x402Version": 2, "accepted": offers["channel"], "payload": {"channel": "ab" * 32, "tick": 1, "word": "cd" * 32}}]
+        junk = [None, -1, 0, 1.5, True, "", "x" * 300, [], {}, "ab" * 32, 10**30]
+        balance, codes = self.c.balance(), {}
+
+        def poke(obj):
+            obj = json.loads(json.dumps(obj))
+            for _ in range(rng.randint(1, 3)):
+                node, keys = obj, []
+                while isinstance(node, dict) and node and rng.random() < 0.7:
+                    k = rng.choice(list(node))
+                    keys.append(k)
+                    if not isinstance(node[k], dict):
+                        break
+                    node = node[k]
+                tgt = obj
+                for k in keys[:-1]:
+                    tgt = tgt[k]
+                if keys:
+                    if rng.random() < 0.2:
+                        del tgt[keys[-1]]
+                    else:
+                        tgt[keys[-1]] = rng.choice(junk)
+                else:
+                    obj["extra_" + str(rng.randint(0, 9))] = rng.choice(junk)
+            return obj
+
+        heads = [x402.encode(poke(rng.choice(good))) for _ in range(400)]
+        heads += [base64.b64encode(rng.randbytes(rng.randint(0, 200))).decode() for _ in range(50)]
+        heads += ["", "=", "e30=", "W10=", "bnVsbA=="]  # "{}", "[]", "null"
+        for h in heads:
+            code, _ = self.c._req("/premium/price", headers={x402.SIGNATURE: h})
+            codes[code] = codes.get(code, 0) + 1
+        # never a crash; the one signed tx can pay at most once (a mutation of a field the
+        # payment doesn't depend on, e.g. maxTimeoutSeconds, still carries a valid tx)
+        self.assertLessEqual(set(codes), {200, 400, 402}, codes)
+        self.assertLessEqual(codes.get(200, 0), 1, codes)
+        self.assertEqual(self.c.balance(), balance - 5 * codes.get(200, 0))
+        self.assertEqual(self.c._req("/health")[0], 200)
+        self.assertTrue(self.chain.valid()[0])
+
     def _raw(self, path, body):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)

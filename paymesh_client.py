@@ -22,8 +22,7 @@ import urllib.parse
 import chain as ch
 import channels
 import wallets
-
-
+import paymesh_x402 as x402
 class PaymentError(Exception):
     pass
 
@@ -39,6 +38,7 @@ class Client:
         self.wallet = wallets.load_or_create(wallet)
         self.timeout = timeout
         self.prices: dict = {}  # path -> PMX, learned from 402s
+        self.offers: dict = {}  # path -> {method: x402 PaymentRequirements} from PAYMENT-REQUIRED
         self.channel: channels.BuyerChannel | None = None
         self.terms: dict | None = None
         self._lock = threading.Lock()
@@ -82,6 +82,7 @@ class Client:
                 c.request("POST" if body is not None else "GET", urllib.parse.urlsplit(base).path + path, body=body, headers=h)
                 r = c.getresponse()
                 raw = r.read().decode()
+                self._tl.headers = r.headers  # x402 headers of the last answer on this thread
                 if r.will_close:
                     self._drop(base)
                 break
@@ -185,13 +186,45 @@ class Client:
         code, body = self._req(path)
         if code != 402:
             return code, body
-        self.prices[path] = price = body["amount"]
+        offers = self._offers(path)
+        self.prices[path] = price = int(offers["tx"]["amount"])
         if self.channel:
             return self._via_channel(path, price)
-        return self._on_chain(path, body)
+        return self._on_chain(path, offers["tx"])
+
+    def _offers(self, path) -> dict:
+        """The paymesh entries of this 402's PAYMENT-REQUIRED header, by transfer method."""
+        try:
+            req = x402.decode(self._tl.headers.get(x402.REQUIRED) or "")
+            offers = {a["extra"]["assetTransferMethod"]: a for a in req.get("accepts", [])
+                      if isinstance(a, dict) and a.get("scheme") == x402.SCHEME and isinstance(a.get("extra"), dict)}
+        except (x402.Invalid, KeyError, TypeError) as e:
+            raise PaymentError(f"402 without a usable {x402.REQUIRED} header: {e}") from None
+        if "tx" not in offers:
+            raise PaymentError(f"402 offers no {x402.SCHEME!r} payment")
+        self.offers[path] = offers
+        return offers
+
+    def last_receipt(self) -> dict | None:
+        """The decoded PAYMENT-RESPONSE (x402 SettlementResponse) of this thread's last call."""
+        h = getattr(self._tl, "headers", None)
+        v = h.get(x402.RESPONSE) if h is not None else None
+        try:
+            return x402.decode(v) if v else None
+        except x402.Invalid:
+            return None
+
+    def _pay(self, path, accepted, payload):
+        sig = x402.encode({"x402Version": x402.VERSION, "accepted": accepted, "payload": payload})
+        return self._req(path, headers={x402.SIGNATURE: sig})
+
+    def _refusal(self, body) -> str:
+        r = self.last_receipt() or {}
+        return r.get("errorMessage") or r.get("errorReason") or (body or {}).get("reason") or str(body)
 
     def _via_channel(self, path, price):
         ticks = math.ceil(price / self.terms["unit"])
+        accepted = self.offers.get(path, {}).get("channel")
         with self._lock:
             try:
                 header = self.channel.pay(ticks)
@@ -200,19 +233,32 @@ class Client:
             self._calls += 1
             if self._calls % self.SAVE_EVERY == 0:
                 self._save_channel()
-        code, body = self._req(path, headers={"X-Channel": header})
-        if code == 402:
-            raise PaymentError(f"channel payment refused: {body.get('reason')}")
+        cid, i, w = header.split()
+        if accepted is None:  # the seller offered no x402 channel entry: legacy header
+            code, body = self._req(path, headers={"X-Channel": header})
+        else:
+            code, body = self._pay(path, accepted, {"channel": cid, "tick": int(i), "word": w})
+        if code in (400, 402):
+            raise PaymentError(f"channel payment refused: {self._refusal(body)}")
         return code, body
 
-    def _on_chain(self, path, challenge):
+    HEADER_LIMIT = 32_000  # a bigger signed tx (old Lamport key) is mined first and sent by txid
+
+    def _on_chain(self, path, accepted):
         led = self._ledger()
-        if led.balance < challenge["amount"]:
-            raise PaymentError(f"insufficient funds for {challenge['amount']} PMX")
-        tx = led.new_tx(self.wallet.address, challenge["recipient"], challenge["amount"], challenge["memo"])
+        amount = int(accepted["amount"])
+        if led.balance < amount:
+            raise PaymentError(f"insufficient funds for {amount} PMX")
+        tx = led.new_tx(self.wallet.address, accepted["payTo"], amount, accepted["extra"]["memo"])
         wallets.sign_tx(tx, self.wallet, led)
-        self._submit(tx)
-        return self._req(path, headers={"X-Payment": tx["txid"]})
+        payload = {"transaction": tx}  # the seller settles it: one request instead of two
+        if len(x402.encode(payload)) > self.HEADER_LIMIT:
+            self._submit(tx)
+            payload = {"txid": tx["txid"]}
+        code, body = self._pay(path, accepted, payload)
+        if code in (400, 402):
+            raise PaymentError(f"payment refused: {self._refusal(body)}")
+        return code, body
 
 
 class _Remote:

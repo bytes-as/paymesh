@@ -58,6 +58,9 @@ class SellerApart(unittest.TestCase):
         code, body = c.get("/forecast")  # 402 from the seller, tx to the node, retry at the seller
         self.assertEqual(code, 200, body)
         self.assertIn("tomorrow_c", body)
+        receipt = c.last_receipt()  # PAYMENT-RESPONSE from the seller, which settled through the node
+        self.assertTrue(receipt["success"], receipt)
+        self.assertEqual(self.chain.find_tx_by_id(receipt["transaction"])[0]["from_wallet"], c.wallet.address)
         seller = self.paywall.wallet.address
         self.assertEqual(self.chain.balance(seller), 3)
         c.open_channel(ticks=30)

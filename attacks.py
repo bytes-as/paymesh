@@ -84,6 +84,36 @@ def run(node: str) -> list:
     attempt("underpay through the channel (1 tick for a 5 PMX route)",
             lambda: me._req("/premium/price", headers={"X-Channel": f"{me.channel.id} 6 {me.channel.words[6]}"}),
             lambda c, b: c == 402)
+    # --- the same, in x402 v2 headers (PAYMENT-SIGNATURE) ---
+    import paymesh_x402 as x402
+    def x402_pay(accepted, payload, version=2):
+        return me._req("/premium/price", headers={x402.SIGNATURE: x402.encode(
+            {"x402Version": version, "accepted": accepted, "payload": payload})})
+
+    def fresh():
+        me._req("/premium/price")  # a 402 with a new challenge in PAYMENT-REQUIRED
+        return me._offers("/premium/price")
+
+    o = fresh()
+    paid = signed(me, seller, 5, o["tx"]["extra"]["memo"])
+    x402_pay(o["tx"], {"transaction": paid})
+    attempt("x402: replay a PAYMENT-SIGNATURE that already paid", lambda: x402_pay(o["tx"], {"transaction": paid}),
+            lambda c, b: c == 402)
+    o = fresh()
+    attempt("x402: claim a 1 PMX quote for a 5 PMX route",
+            lambda: x402_pay(dict(o["tx"], amount="1"), {"transaction": signed(me, seller, 1, o["tx"]["extra"]["memo"])}),
+            lambda c, b: c == 400)
+    attempt("x402: settle a tx that pays myself instead of the seller",
+            lambda: x402_pay(o["tx"], {"transaction": signed(me, me.wallet.address, 5, o["tx"]["extra"]["memo"])}),
+            lambda c, b: c == 402)
+    attempt("x402: pay a channel call with a word off the hash chain",
+            lambda: x402_pay(o["channel"], {"channel": me.channel.id, "tick": 7, "word": "cd" * 32}),
+            lambda c, b: c == 402)
+    attempt("x402: pay with another chain's network id",
+            lambda: x402_pay(dict(o["tx"], network="paymesh:" + "0" * 32), {"txid": paid["txid"]}),
+            lambda c, b: c == 400)
+    attempt("x402: garbage PAYMENT-SIGNATURE",
+            lambda: me._req("/premium/price", headers={x402.SIGNATURE: "e30=" * 9000}), lambda c, b: c == 400)
     attempt("wallet name that escapes the wallet folder", lambda: me._node("/faucet?name=../../evil"), no)
     attempt("malformed JSON body", lambda: raw_post(node, "/tx", b"{"), lambda c, b: c == 400)
     attempt("node still healthy afterwards", lambda: me._node("/health"), lambda c, b: c == 200)
