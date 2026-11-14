@@ -1,78 +1,97 @@
 # paymesh
 
-x402-style **pay-per-call micropayment settlement** on a local Python mini-blockchain. Any HTTP API can drop the `paywall` middleware onto its handler and start charging PMX per call; autonomous agents discover the `402` challenge, pay on-chain, and retry — no accounts, no keys on the wire, no payment processor.
+x402-style **pay-per-call micropayments** for HTTP APIs, settled on a local
+Python mini-blockchain. A paid route answers `402 Payment Required`; an agent
+pays and retries, with no accounts and no payment processor. Two ways to pay:
 
-**Why it's interesting:** agents need to pay APIs by the call, in amounts too small for cards. Early niche: agent-to-API micropayments with settlement you can run and verify yourself.
+* **on-chain**: one signed tx per call (about 7 ms on this machine);
+* **payment channel**: one deposit on-chain, then every call carries the next
+  word of a hash chain, checked with a few hashes (0.4 ms), settled in one block.
 
-## Run the system locally (one command)
+Python 3 stdlib only. Protocol details: [PROTOCOL.md](PROTOCOL.md).
+
+## Run it
 
 ```
 cd C:\Users\ARUN\OpenBot\Shared\paymesh
-py -3 paymesh.py            # run the whole system in the foreground (Ctrl-C stops)
-py -3 paymesh.py start      # or detached in the background (logs: paymesh.log)
-py -3 paymesh.py status     # is it up?
-py -3 paymesh.py stop       # stop the detached system
+py -3 paymesh.py start        # chain + paid API on :8402 + explorer on :8403 (background)
+py -3 buyer_agent.py          # demo: 2 calls paid on-chain, 20 through a channel, settle
+open http://127.0.0.1:8403    # explorer: stats, channels, blocks, txs, balances
+py -3 paymesh.py status | stop
 ```
 
-What runs: the mini blockchain (`chain.json`), the paid API on :8402 and the
-explorer on :8403, all in one process — the server is the sole miner.
+## Use it from an agent
 
-The demo is the flows running locally against the live system:
-
-```
-py -3 buyer_agent.py                    # agent discovers 402s, pays 5 PMX for
-                                        # /premium/price and 20 PMX for
-                                        # /premium/history, auto-funds from /faucet
-open http://127.0.0.1:8403              # watch chain, txs, balances live
-```
-
-Free routes need no payment: `GET /open/info`, `GET /faucet?name=you`
-(mints 100 PMX), `GET /health`. Agents submit signed txs with
-`POST /tx` — the server verifies the Lamport signature and mines.
-
-## Architecture
-
-```
- buyer_agent.py            server.py (:8402)          chain.py
- (autonomous)              GET /premium/price         mini blockchain
-      |                         |                      sha256-linked blocks
-      | 1. GET ---------------> |                      PoW difficulty 2
-      | <-- 402 + challenge --- |  (paywall.py)         chain.json
-      |    nonce, recipient,    |------ open_challenge (nonce = tx memo)
-      |    amount               |
-      | 2. sign: build tx       |  wallets.py
-      |    memo=nonce, Lamport- |  Lamport one-time sig, pure hashlib
-      |    sign (from,to,amount,|  address = fingerprint of the public key
-      |    memo,txid)           |
-      |    POST /tx ------------+--------> verify_tx(): wrong/no key rejected;
-      | 3. GET + X-Payment: txid              server is the sole miner
-      | -----------------------> verify tx in block, nonce unspent
-      | <-- 200 price data -----        (replay / double-pay / forgery rejected)
-
-Signature flow: each tx carries pub (512 sha256 hashes) + sig (256 revealed
-secrets, one per digest bit). Chain rule: pub must fingerprint to from_wallet
-and the Lamport verify must pass; only the zero-address faucet may send
-unsigned txs. So a client cannot spend another wallet's address by naming it.
-
- explorer.py (:8403) — chain, txs, balances, auto-refresh 2s
+```python
+from paymesh_client import Client
+api = Client("http://127.0.0.1:8402", wallet="my-agent")
+api.faucet()                              # demo money: 100 PMX
+status, data = api.get("/premium/price")  # pays on-chain by itself
+api.open_channel(ticks=500)               # lock 500 PMX once
+status, data = api.get("/premium/price")  # now paid from the channel
+api.close_channel()                       # settle; the unspent rest comes back
 ```
 
-## Attack guarantees
+The client learns each route's price from its first 402, keeps one HTTP
+connection alive, and saves its channel so it can resume after a restart.
 
-- **Replay:** each challenge nonce is consumed on first verify; reusing a spent `X-Payment` header returns 402.
-- **Double-pay:** a nonce binds to exact recipient+amount+path via its memo; a second verify of the same txid finds the challenge already spent.
-- **Broke agent:** client checks balance before paying; a 0-balance wallet can't fund the tx.
+## Numbers
+
+`py -3 bench.py 100 2000`, on a separate server (never the live one), this machine:
+
+| | on-chain | channel | 8 agents, channels |
+|---|---|---|---|
+| paid calls per second | 142 | 2,467 | 3,320 (0 errors) |
+| latency p50 / p95 | 6.3 / 16.1 ms | 0.39 / 0.49 ms | |
+| chain bytes per call | 5,238 | 5 | |
+
+A paid tx costs 7.7 ms whether the chain has 100 or 2,000 blocks (blocks are
+appended, not rewritten).
+
+## Guarantees, each covered by a test
+
+`py -3 -m unittest discover -s tests` (31 tests: attacks, channels, HTTP end
+to end, client SDK).
+
+* **Keys are one-time and rotate every tx.** A signature can't be reused or
+  extended into a forgery; a spent key never verifies again.
+* **No overspending, negative or zero amounts, or minting.** Pending txs count
+  against the balance; only `GET /faucet` mints, at most 100 PMX.
+* **A signed tx counts once.** Resubmitting it is refused.
+* **A payment pays once.** Replayed `X-Payment` headers and spent channel words
+  are refused, also after a server restart. A wrong payment can't burn someone
+  else's challenge.
+* **Channel money is safe.** The seller can only claim ticks the buyer
+  revealed; signed channel terms can't be altered; an unsettled channel
+  refunds to the buyer after expiry, and the server settles paid channels
+  before that.
+* **The chain file is checked on load.** Every block is replayed through the
+  same rules, so an edited history is refused; a block cut off by a crash is
+  dropped cleanly.
+* **The HTTP surface holds.** Wallet names can't escape `wallets/`, bodies
+  are size-capped, bad input gets `400` (never a crash), and the explorer
+  escapes everything it shows.
+
+## Limits (it's a proof of concept)
+
+* PMX is play money: the faucet mints it for anyone, and one server is the
+  only miner, so there's no consensus and no fees.
+* Wallet files hold their seed in plain text under `wallets/` (kept out of git).
+* The chain is verified in full on every start (about 0.45 s per 1,000 blocks).
+* The payment format is x402-style, not wire-compatible with the x402 spec.
 
 ## Files
 
 | file | role |
 |---|---|
-| `chain.py` | mini blockchain, PoW, `chain.json` persistence |
-| `wallets.py` | Lamport one-time signatures (pure hashlib), chain-scan balances |
-| `paywall.py` | 402 challenge/verify middleware |
-| `paymesh.py` | system launcher: run/start/stop/status |
-| `server.py` | demo paid API with a per-endpoint price table (`/open/info` 0, `/premium/price` 5, `/premium/history` 20, free `/faucet`, `POST /tx`) on :8402 |
-| `buyer_agent.py` | agent that discovers 402, self-pays, retries (price + history) |
-| `explorer.py` | HTML dashboard on :8403 |
-
-Python 3 stdlib only, no dependencies.
+| `chain.py` | ledger rules, blocks, PoW, append-only `chain.json` |
+| `wallets.py` | one-time keys (WOTS, Lamport for old keys), rotation, signing |
+| `channels.py` | PayWord payment channels: buyer hash chain, seller log |
+| `paywall.py` | 402 challenges and on-chain payment checks |
+| `server.py` | demo paid API: prices, `/tx`, `/account`, `/faucet`, channel routes |
+| `paymesh_client.py` | client SDK |
+| `buyer_agent.py` | demo agent |
+| `explorer.py` | dashboard on :8403 |
+| `paymesh.py` | launcher: run / start / stop / status |
+| `bench.py` | throughput benchmark |
+| `tests/` | the test suite |
