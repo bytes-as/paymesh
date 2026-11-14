@@ -57,7 +57,7 @@ class PaymeshTx:
 def main():
     home, port = tempfile.mkdtemp(prefix="paymesh-interop-"), free_port()
     env = dict(os.environ, PAYMESH_HOME=home, PAYMESH_API_PORT=str(port), PAYMESH_EXPLORER_PORT=str(free_port()))
-    node = subprocess.Popen(["py", "-3", os.path.join(PAYMESH, "paymesh.py"), "serve"], env=env,
+    node = subprocess.Popen([sys.executable, os.path.join(PAYMESH, "paymesh.py"), "serve"], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     url = f"http://127.0.0.1:{port}"
     try:
