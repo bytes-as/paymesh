@@ -1,14 +1,17 @@
 # paymesh
 
-x402-style **pay-per-call micropayments** for HTTP APIs, settled on a local
-Python mini-blockchain. A paid route answers `402 Payment Required`; an agent
-pays and retries, with no accounts and no payment processor. Two ways to pay:
+**x402 v2** pay-per-call micropayments for HTTP APIs, settled on a local Python
+mini-blockchain. A paid route answers `402 Payment Required` with a
+`PAYMENT-REQUIRED` header; an agent pays in `PAYMENT-SIGNATURE` and gets a
+`PAYMENT-RESPONSE` receipt, with no accounts and no payment processor. paymesh
+is an x402 scheme (`paymesh`) with two ways to pay:
 
-* **on-chain**: one signed tx per call (about 3 ms on this machine);
+* **on-chain**: one signed tx per call, sent in the header and settled by the seller;
 * **payment channel**: one deposit on-chain, then every call carries the next
   word of a hash chain, checked with a few hashes (0.4 ms), settled in one block.
 
-Python 3 stdlib only. Protocol details: [PROTOCOL.md](PROTOCOL.md).
+Python 3 stdlib only. Protocol details: [PROTOCOL.md](PROTOCOL.md). Checked against the
+reference x402 Python SDK: `interop/x402_reference.py`.
 
 ## Run it
 
@@ -27,6 +30,7 @@ from paymesh_client import Client
 api = Client("http://127.0.0.1:8402", wallet="my-agent")
 api.faucet()                              # demo money: 100 PMX
 status, data = api.get("/premium/price")  # pays on-chain by itself
+api.last_receipt()                        # the PAYMENT-RESPONSE: success, txid, payer
 api.open_channel(ticks=500)               # lock 500 PMX once
 status, data = api.get("/premium/price")  # now paid from the channel
 api.close_channel()                       # settle; the unspent rest comes back
@@ -40,7 +44,7 @@ connection alive, and saves its channel so it can resume after a restart.
 ```python
 from paymesh_seller import Paywall
 paywall = Paywall(node="http://127.0.0.1:8402", wallet="my-shop", prices={"/forecast": 3})
-app = paywall.wsgi(my_wsgi_app)   # or, in any framework: ok, status, body = paywall.check(path, headers)
+app = paywall.wsgi(my_wsgi_app)   # or, in any framework: ok, status, body, headers = paywall.gate(path, headers, url)
 ```
 
 The seller runs apart from the node: it keeps its own wallet, challenges and
@@ -66,9 +70,9 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (40 tests: attacks, channels, HTTP end
-to end, client SDK, a separate seller API, seeded fuzzing, wallets at rest).
-`py -3 attacks.py` runs 14 attacks against a scratch node and shows each refused.
+`py -3 -m unittest discover -s tests` (54 tests: attacks, channels, HTTP end
+to end, client SDK, a separate seller API, x402 headers, seeded fuzzing, wallets at rest).
+`py -3 attacks.py` runs 22 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
@@ -76,9 +80,14 @@ to end, client SDK, a separate seller API, seeded fuzzing, wallets at rest).
 * **No overspending, negative or zero amounts, or minting.** Pending txs count
   against the balance; only `GET /faucet` mints, at most 100 PMX.
 * **A signed tx counts once.** Resubmitting it is refused.
-* **A payment pays once.** Replayed `X-Payment` headers and spent channel words
+* **A payment pays once.** Replayed `PAYMENT-SIGNATURE` / `X-Payment` headers and spent channel words
   are refused, also after a server restart. A wrong payment can't burn someone
-  else's challenge.
+  else's challenge. A signed tx in `PAYMENT-SIGNATURE` is put on chain only if it
+  pays an open challenge for that route exactly, so a refused one costs nothing.
+* **A seller never holds two signatures from one key.** After a seller refuses
+  a signed tx, the client retires that key (a self-payment via the node) before
+  signing again; the kept tx can no longer be mined. (With a balance of 0 it
+  can't, and says so: fund the wallet before paying again.)
 * **Channel money is safe.** The seller can only claim ticks the buyer
   revealed; signed channel terms can't be altered; an unsettled channel
   refunds to the buyer after expiry, and the server settles paid channels
@@ -103,7 +112,8 @@ to end, client SDK, a separate seller API, seeded fuzzing, wallets at rest).
   unless created with `wallet.py new <name> --encrypt` (scrypt + HMAC-SHA256,
   passphrase from `PAYMESH_PASSPHRASE`).
 * Rate limits are per client IP, so clients behind one address share them.
-* The payment format is x402-style, not wire-compatible with the x402 spec.
+* x402: v2 HTTP headers only; no CORS headers for browser clients, no facilitator
+  endpoints (`/verify`, `/settle`), no v1 (`X-PAYMENT`, which here is the native txid header).
 
 ## Files
 
@@ -112,6 +122,7 @@ to end, client SDK, a separate seller API, seeded fuzzing, wallets at rest).
 | `chain.py` | ledger rules, blocks, PoW, append-only `chain.json` |
 | `wallets.py` | one-time keys (WOTS, Lamport for old keys), rotation, signing |
 | `channels.py` | PayWord payment channels: buyer hash chain, seller log |
+| `paymesh_x402.py` | x402 v2 wire format: `PAYMENT-REQUIRED` / `-SIGNATURE` / `-RESPONSE` for the `paymesh` scheme |
 | `paywall.py` | 402 challenges and on-chain payment checks |
 | `server.py` | demo paid API: prices, `/tx`, `/account`, `/faucet`, `/stats`, channel routes, miner, rate limits |
 | `paymesh_client.py` | client SDK |
@@ -123,3 +134,4 @@ to end, client SDK, a separate seller API, seeded fuzzing, wallets at rest).
 | `paymesh.py` | launcher: run / start / stop / status |
 | `bench.py` | throughput benchmark |
 | `tests/` | the test suite |
+| `interop/x402_reference.py` | pays a scratch node with the reference x402 SDK (needs its own venv) |

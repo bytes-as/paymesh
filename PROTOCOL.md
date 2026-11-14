@@ -3,7 +3,67 @@
 Everything a client or server needs to interoperate with paymesh. Amounts are
 whole PMX. Hashes are SHA-256, written as 64 lowercase hex characters.
 
-## 1. Paying for a call
+## 0. x402 wire format
+
+paymesh speaks **x402 Protocol Version 2** in its HTTP transport, as specified in
+[`specs/x402-specification-v2.md`](https://github.com/x402-foundation/x402/blob/31ce6bbf7e3af2f56f07ec9b9ac38168b3ca1a41/specs/x402-specification-v2.md)
+and [`specs/transports-v2/http.md`](https://github.com/x402-foundation/x402/blob/31ce6bbf7e3af2f56f07ec9b9ac38168b3ca1a41/specs/transports-v2/http.md)
+at commit `31ce6bb` (2026-11-12) of github.com/x402-foundation/x402. Code: `paymesh_x402.py`.
+
+| header | direction | carries (base64 of JSON) |
+|---|---|---|
+| `PAYMENT-REQUIRED` | server → client, on every 402 | `PaymentRequired` |
+| `PAYMENT-SIGNATURE` | client → server, on the retry | `PaymentPayload` |
+| `PAYMENT-RESPONSE` | server → client, on the paid 200 or a refused 402/400 | `SettlementResponse` |
+
+Scheme **`paymesh`**, network **`paymesh:<first 32 hex of the genesis block hash>`**
+(CAIP-2 shape; `GET /health` reports it), asset `PMX`, `amount` a decimal string of
+whole PMX. Every 402 offers two `accepts` entries, one per `extra.assetTransferMethod`;
+both settle before the resource runs, so `extra.paymentFlow` is `upfront` (spec 6.1):
+
+```json
+{"x402Version": 2, "error": "PAYMENT-SIGNATURE header is required",
+ "resource": {"url": "http://127.0.0.1:8402/premium/price", "mimeType": "application/json"},
+ "accepts": [
+  {"scheme": "paymesh", "network": "paymesh:00f359b2...", "amount": "5", "asset": "PMX",
+   "payTo": "<seller address>", "maxTimeoutSeconds": 300,
+   "extra": {"assetTransferMethod": "tx", "paymentFlow": "upfront", "memo": "<challenge memo>", "nonce": "<32 hex>"}},
+  {"scheme": "paymesh", ..., "extra": {"assetTransferMethod": "channel", "paymentFlow": "upfront",
+   "unit": 1, "terms": "/channel/terms"}}]}
+```
+
+`PaymentPayload.payload` by method:
+
+* `tx`: `{"transaction": <signed pay tx, section 3>}`: the server checks it pays
+  `payTo` exactly `amount` with an open challenge's memo, then puts it on chain
+  (settles) and serves. Or `{"txid": "<64 hex>"}` for a tx the client already
+  mined (used for txs too big for a header, e.g. an old Lamport key).
+* `channel`: `{"channel": "<channel id>", "tick": i, "word": "<w_i, 64 hex>"}`, checked as in 1b.
+
+`accepted` must echo this route's `scheme`, `network`, `asset`, `payTo` and `amount`.
+Answers: `200` + `PAYMENT-RESPONSE {"success": true, "transaction": <txid, or "" for a
+channel tick>, "network", "payer", "amount"}`; `400` for a malformed header
+(`errorReason` `invalid_payload`, `invalid_x402_version`, `unsupported_scheme`,
+`invalid_network`, `invalid_payment_requirements`); `402` for a refused payment, with
+`PAYMENT-RESPONSE {"success": false, "errorReason", "errorMessage"}` and a fresh
+`PAYMENT-REQUIRED`. paymesh-specific reasons: `invalid_paymesh_payload_recipient_mismatch`,
+`invalid_paymesh_payload_value_mismatch`, `invalid_paymesh_challenge`,
+`invalid_paymesh_channel_payment`, `invalid_paymesh_payment`; `invalid_transaction_state`
+when the ledger refuses the tx.
+
+A client that sent a signed tx and was refused retires that one-time key (a 1 PMX
+payment to itself, sent to the node) before signing anything else, so a seller that
+keeps a refused tx never holds two signatures from one key.
+
+Tested against the reference Python SDK (`x402` 2.27.0 from PyPI, installed in a scratch
+venv, never imported by paymesh): its parser reads our `PAYMENT-REQUIRED`, its `requests` wrapper pays
+a route end to end through a small `paymesh` scheme plugin, and its own
+`PaymentPayload` encoder pays a channel tick (`interop/x402_reference.py`). Not done: CORS headers for browser
+clients, the facilitator endpoints (`/verify`, `/settle`, `/supported`), x402 v1.
+
+The headers below (`X-Payment`, `X-Channel`) still work.
+
+## 1. Paying for a call (paymesh-native headers)
 
 ### 1a. On-chain (one tx per call)
 
