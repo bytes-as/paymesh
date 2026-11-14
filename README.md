@@ -4,7 +4,7 @@ x402-style **pay-per-call micropayments** for HTTP APIs, settled on a local
 Python mini-blockchain. A paid route answers `402 Payment Required`; an agent
 pays and retries, with no accounts and no payment processor. Two ways to pay:
 
-* **on-chain**: one signed tx per call (about 7 ms on this machine);
+* **on-chain**: one signed tx per call (about 3 ms on this machine);
 * **payment channel**: one deposit on-chain, then every call carries the next
   word of a hash chain, checked with a few hashes (0.4 ms), settled in one block.
 
@@ -41,17 +41,19 @@ connection alive, and saves its channel so it can resume after a restart.
 
 | | on-chain | channel | 8 agents, channels |
 |---|---|---|---|
-| paid calls per second | 142 | 2,467 | 3,320 (0 errors) |
-| latency p50 / p95 | 6.3 / 16.1 ms | 0.39 / 0.49 ms | |
+| paid calls per second | 296 | 2,495 | 3,511 (0 errors) |
+| latency p50 / p95 | 3.3 / 3.9 ms | 0.38 / 0.48 ms | |
 | chain bytes per call | 5,238 | 5 | |
 
-A paid tx costs 7.7 ms whether the chain has 100 or 2,000 blocks (blocks are
-appended, not rewritten).
+With 8 separate client processes paying on-chain the server mines 651 paid
+calls per second (pending txs share blocks). The cost of a paid tx doesn't
+grow with the chain (blocks are appended), and a restart at 10,000 blocks
+takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (31 tests: attacks, channels, HTTP end
-to end, client SDK).
+`py -3 -m unittest discover -s tests` (37 tests: attacks, channels, HTTP end
+to end, client SDK, seeded fuzzing).
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
   extended into a forgery; a spent key never verifies again.
@@ -69,15 +71,20 @@ to end, client SDK).
   same rules, so an edited history is refused; a block cut off by a crash is
   dropped cleanly.
 * **The HTTP surface holds.** Wallet names can't escape `wallets/`, bodies
-  are size-capped, bad input gets `400` (never a crash), and the explorer
-  escapes everything it shows.
+  are size-capped, bad input gets `400` (never a crash: 1,000 fuzzed txs and
+  315 fuzzed payment headers per run), a tx can't carry fields beyond its
+  kind's, clients over their rate limit get `429`, and the explorer escapes
+  everything it shows.
+* **Checkpoints can't hide anything.** A checkpoint that doesn't match the
+  chain is ignored; one edited to lie is caught by the background full check,
+  and the node then refuses txs (`/health` answers 503).
 
 ## Limits (it's a proof of concept)
 
 * PMX is play money: the faucet mints it for anyone, and one server is the
   only miner, so there's no consensus and no fees.
 * Wallet files hold their seed in plain text under `wallets/` (kept out of git).
-* The chain is verified in full on every start (about 0.45 s per 1,000 blocks).
+* Rate limits are per client IP, so clients behind one address share them.
 * The payment format is x402-style, not wire-compatible with the x402 spec.
 
 ## Files
@@ -88,7 +95,7 @@ to end, client SDK).
 | `wallets.py` | one-time keys (WOTS, Lamport for old keys), rotation, signing |
 | `channels.py` | PayWord payment channels: buyer hash chain, seller log |
 | `paywall.py` | 402 challenges and on-chain payment checks |
-| `server.py` | demo paid API: prices, `/tx`, `/account`, `/faucet`, channel routes |
+| `server.py` | demo paid API: prices, `/tx`, `/account`, `/faucet`, `/stats`, channel routes, miner, rate limits |
 | `paymesh_client.py` | client SDK |
 | `buyer_agent.py` | demo agent |
 | `explorer.py` | dashboard on :8403 |

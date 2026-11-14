@@ -60,6 +60,8 @@ spent; a txid pays once. Challenges live 300 s; at most 10,000 are open.
 | `GET /account?address=<addr>` | `{"balance", "current_key", "height", "channels"}`: what a client needs to sign its next tx |
 | `GET /faucet?address=<addr>` | mints 100 PMX to `addr` (demo only); `?name=` creates a wallet on the server's machine |
 | `POST /tx` | submit a signed tx (body up to 200 KB); `400 {"error"}` if any rule fails. Faucet txs are refused here. |
+| `GET /stats` | paid calls and PMX per route, on-chain / channel, distinct payers |
+| any of `/faucet`, `/tx`, a 402 challenge | `429 {"error": "too many requests", "retry_after_s"}` with `Retry-After` when a client is over its limit |
 
 The server speaks HTTP/1.1 with keep-alive. It binds 127.0.0.1 by default
 (`PAYMESH_API_PORT`, `PAYMESH_EXPLORER_PORT`, `PAYMESH_HOME` change ports and
@@ -87,6 +89,7 @@ when `chain.json` is loaded:
 * `channel_close`: from the channel's seller to its buyer, `amount == ticks * unit`, `sha256^ticks(word) == anchor`, signed by the seller;
 * `channel_refund`: from the buyer to itself for the whole deposit, from the `expires` height on;
 * the faucet (address `0` x 64) mints at most 100 PMX per tx, only through `GET /faucet`.
+* a tx carries only its kind's fields (above); anything else is refused.
 
 ## 4. Signatures and keys
 
@@ -112,4 +115,6 @@ of a one-time key that a signature publishes is useless to anyone else.
 (append-only). A block is `{"index", "timestamp", "txs", "prev_hash", "nonce",
 "hash"}`; its hash is `sha256("index|timestamp|json(txs, sorted keys)|prev_hash|nonce")`
 and starts with `00` (proof of work, difficulty 2). The server is the only
-miner and mines one block per accepted tx.
+miner; a miner thread puts every pending tx into its next block, and `POST /tx`
+answers once the tx is mined. Every 500 blocks the ledger is checkpointed to
+`chain.json.ckpt` (tip hash + ledger) to make restarts fast.
