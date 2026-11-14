@@ -24,14 +24,20 @@ PAGE = """<!doctype html>
 body{font-family:Consolas,monospace;background:#0d1117;color:#c9d1d9;margin:24px}
 h1{color:#58a6ff} h2{color:#8b949e;border-bottom:1px solid #30363d;padding-bottom:4px}
 table{border-collapse:collapse;margin-bottom:24px} td,th{border:1px solid #30363d;padding:4px 10px;text-align:left}
-th{background:#161b22;color:#58a6ff} .ok{color:#3fb950}
+th{background:#161b22;color:#58a6ff} .ok{color:#3fb950} .dim{color:#8b949e}
 code{color:#ffa657}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin:8px 0 24px}
+.stat{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 14px;min-width:120px}
+.stat b{display:block;font-size:22px;color:#e6edf3}.stat span{color:#8b949e;font-size:12px}
 </style></head><body>
 <h1>paymesh explorer</h1>
-<h2>chain</h2>
+<div class="stats" id="stats"></div>
+<h2>payment channels</h2>
+<table id="chans"><tr><th>channel</th><th>buyer</th><th>seller</th><th>deposit PMX</th><th>paid PMX</th><th>expires at block</th><th>state</th></tr></table>
+<h2>chain <span class="dim">(last 50 blocks)</span></h2>
 <table id="chain"><tr><th>block</th><th>hash</th><th>prev</th><th>nonce</th><th>txs</th></tr></table>
-<h2>transactions</h2>
-<table id="txs"><tr><th>txid</th><th>from</th><th>to</th><th>amount</th><th>memo</th></tr></table>
+<h2>transactions <span class="dim">(last 50)</span></h2>
+<table id="txs"><tr><th>txid</th><th>kind</th><th>from</th><th>to</th><th>amount</th><th>memo</th></tr></table>
 <h2>endpoint prices</h2>
 <table id="prices"><tr><th>endpoint</th><th>price PMX</th></tr></table>
 <h2>wallet balances</h2>
@@ -40,12 +46,17 @@ code{color:#ffa657}
 const data = DATA;
 const ESC = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
 const esc = s => String(s).replace(/[&<>"']/g, ch => ESC[ch]);
+const st = document.getElementById('stats');
+data.stats.forEach(([k,v])=>st.insertAdjacentHTML('beforeend', `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`));
+const ch = document.getElementById('chans');
+data.channels.forEach(x=>ch.insertAdjacentHTML('beforeend', `<tr><td><code>${esc(x.id.slice(0,12))}..</code></td><td>${esc(x.buyer_name)}</td><td>${esc(x.seller_name)}</td><td>${esc(x.deposit)}</td><td class="ok">${esc(x.paid)}</td><td>${esc(x.expires)}</td><td>${x.open?'<span class="ok">open</span>':'settled'}</td></tr>`));
+if(!data.channels.length) ch.insertAdjacentHTML('beforeend','<tr><td colspan="7" class="dim">no channels yet</td></tr>');
 const c = document.getElementById('chain');
 [...data.blocks].reverse().forEach(b=>{
   c.insertAdjacentHTML('beforeend', `<tr><td>${b.index}</td><td><code>${b.hash.slice(0,16)}..</code></td><td><code>${b.prev_hash.slice(0,10)}..</code></td><td>${b.nonce}</td><td>${b.txs.length}</td></tr>`)});
 const t = document.getElementById('txs');
 [...data.txs].reverse().forEach(x=>{
-  t.insertAdjacentHTML('beforeend', `<tr><td><code>${x.txid.slice(0,16)}..</code></td><td><code>${x.from_wallet.slice(0,10)}..</code></td><td><code>${x.to_wallet.slice(0,10)}..</code></td><td>${esc(x.amount)}</td><td>${esc(x.memo)}</td></tr>`)});
+  t.insertAdjacentHTML('beforeend', `<tr><td><code>${x.txid.slice(0,16)}..</code></td><td>${esc(x.kind||'pay')}</td><td><code>${x.from_wallet.slice(0,10)}..</code></td><td><code>${x.to_wallet.slice(0,10)}..</code></td><td>${esc(x.amount)}</td><td>${esc(x.memo)}</td></tr>`)});
 const p = document.getElementById('prices');
 Object.entries(data.prices||{}).forEach(([r,v])=>{
   p.insertAdjacentHTML('beforeend', `<tr><td><code>${esc(r)}</code></td><td class="ok">${esc(v)}</td></tr>`)});
@@ -64,13 +75,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             self._send(200, "ok")
         else:
+            names = {w.address: w.name for w in _named_wallets()}
             with chain_inst.lock:
-                blocks = [b.to_dict() for b in chain_inst.blocks]
+                blocks = [b.to_dict() for b in chain_inst.blocks[-50:]]
+                txs = [_slim(t) for b in chain_inst.blocks[-200:] for t in b.txs][-50:]
+                n_txs = sum(len(b.txs) for b in chain_inst.blocks)
+                chans = [dict(v, id=k) for k, v in chain_inst.ledger.channels.items()]
+                height = chain_inst.height
+            nm = lambda a: names.get(a, a[:10] + "..")  # noqa: E731
+            channels_view = [{"id": c["id"], "buyer_name": nm(c["buyer"]), "seller_name": nm(c["seller"]),
+                              "deposit": c["n"] * c["unit"], "paid": c.get("paid", "-") if not c["open"] else "-",
+                              "expires": c["expires"], "open": c["open"]} for c in reversed(chans[-50:])]
+            stats = [("blocks", height), ("transactions", n_txs),
+                     ("open channels", sum(c["open"] for c in chans)),
+                     ("PMX locked in channels", sum(c["n"] * c["unit"] for c in chans if c["open"])),
+                     ("PMX settled via channels", sum(c.get("paid", 0) for c in chans if not c["open"]))]
             data = {"blocks": [dict(b, txs=[_slim(t) for t in b["txs"]]) for b in blocks],
-                    "txs": [_slim(t) for t in chain_inst.all_txs()],
+                    "txs": txs, "stats": stats, "channels": channels_view,
                     "balances": chain_inst.balances(),
                     "prices": PRICES_MAP,
-                    "names": {w.address: w.name for w in _named_wallets()}}
+                    "names": names}
             # "<" escaped so no value (a memo) can close the <script> it sits in
             self._send(200, PAGE.replace("DATA", json.dumps(data).replace("<", "\\u003c")))
 
