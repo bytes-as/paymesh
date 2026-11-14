@@ -12,7 +12,9 @@
  * Channels (the fast path): with channelTicks set, the first paid call to a seller opens a
  * PayWord channel inside its payment (the signed channel_open travels in PAYMENT-SIGNATURE
  * with the first word; the seller mines it), and later calls pay with the next word of the
- * hash chain: a few hashes, no transaction, no new one-time key. Without it, every call pays
+ * hash chain: a few hashes, no transaction, no new one-time key. With { hub: true } too, the
+ * channel is opened to the seller's hub, and that one deposit pays every seller that takes the
+ * hub's channels (the node and sellers running apart alike). Without it, every call pays
  * with a signed tx. A page can't post to /tx itself, which is why the open rides along.
  *
  * Keys: a browser page can't read /account or post to /tx (paymesh refuses other sites there,
@@ -288,6 +290,7 @@
       this.wallet = wallet;
       this.onSave = onSave || (() => {});
       this.channelTicks = (opts && opts.channelTicks) || 0;
+      this.hub = !!(opts && opts.hub); // open the channel to the seller's hub: one deposit pays any seller
     }
     async _fetch(path, headers) {
       const r = await fetch(this.api + path, { headers: headers || {}, credentials: "omit" });
@@ -333,10 +336,12 @@
     /** Pay with the next word of this seller's channel; open one inside the payment if needed.
      * Returns null when the channel can't be used (the caller pays with a tx instead). */
     async _viaChannel(path, accepted) {
-      const w = this.wallet, seller = accepted.payTo, unit = Number(accepted.extra.unit || 1);
-      const ticks = Math.ceil(Number(accepted.amount) / unit);
+      const w = this.wallet;
+      const seller = this.hub && accepted.extra.hub ? accepted.extra.hub : accepted.payTo; // who the channel pays
       let c = w.channels[seller];
-      if (c && c.id && c.unit === unit && c.left() >= ticks) {
+      const unit = c ? c.unit : Number(accepted.extra.unit || 1);
+      const ticks = Math.ceil(Number(accepted.amount) / unit);
+      if (c && c.id && c.left() >= ticks) {
         c.spent += ticks;
         const [r, receipt] = await this._pay(path, accepted, { channel: c.id, tick: c.spent, word: c.words[c.spent] });
         if (r.status !== 200) {

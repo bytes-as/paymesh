@@ -198,6 +198,28 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(self.paywall.book.best(shop_ch["id"])["i"], 6)
         self.assertEqual(self.chain.balance(addr), 100 - 2 * (20 + 1))  # two deposits and their fees, nothing else
 
+    def test_one_hub_channel_pays_the_node_and_a_separate_seller(self):
+        seed, addr = self.funded()
+        out = js("const w = new P.Wallet(P.unhex(input.seed)); let saved;"
+                 "const opts = { channelTicks: 40, hub: true };"
+                 "const node = new P.Client(input.node, w, x => saved = JSON.stringify(x), opts);"
+                 "const shop = new P.Client(input.shop, w, x => saved = JSON.stringify(x), opts);"
+                 "const r = [];"
+                 "for (const [c, p] of [[node, '/premium/price'], [shop, '/forecast'], [node, '/premium/price'],"
+                 "                      [shop, '/forecast'], [node, '/premium/price']]) {"
+                 "  const x = await c.get(p); r.push([x.status, x.via]); }"
+                 "return { r, nextIndex: w.nextIndex, saved: JSON.parse(saved) };",
+                 {"seed": seed.hex(), "node": f"http://127.0.0.1:{self.port}", "shop": f"http://127.0.0.1:{self.sport}"})
+        self.assertEqual(out["r"], [[200, "channel-open"]] + [[200, "channel"]] * 4)
+        self.assertEqual(out["nextIndex"], 1)  # one signature for five calls at two sellers
+        hub = server.HUB_WALLET.address
+        self.assertEqual(list(out["saved"]["channels"]), [hub])
+        cid = out["saved"]["channels"][hub]["id"]
+        self.assertEqual(out["saved"]["channels"][hub]["spent"], 5 + 3 + 5 + 3 + 5)
+        c = self.chain.ledger.channels[cid]
+        self.assertEqual((c["buyer"], c["seller"], c["n"]), (addr, hub, 40))
+        self.assertEqual(server.HUB.credits[cid], {server.SELLER.address: 15, self.paywall.wallet.address: 6})
+
     def test_the_js_client_pays_a_route_twice(self):
         seed = os.urandom(32)
         addr = wallets.Wallet("jsbuyer", seed).address
