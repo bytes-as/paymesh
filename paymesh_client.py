@@ -71,6 +71,9 @@ class Client:
         return self._req(path, data, headers, base=self.node)
 
     def _req(self, path, data=None, headers=None, base=None):
+        if path.startswith(("http://", "https://")):  # another seller: get("http://host:port/route")
+            u = urllib.parse.urlsplit(path)
+            base, path = f"{u.scheme}://{u.netloc}", (u.path or "/") + (f"?{u.query}" if u.query else "")
         base = base or self.api
         body = json.dumps(data).encode() if data is not None else None
         h = {"Content-Type": "application/json"} if body else {}
@@ -147,7 +150,7 @@ class Client:
         c = channels.BuyerChannel(raw["ticks"], bytes.fromhex(raw["seed"]))
         c.id, c.spent = raw["id"], raw["spent"]
         # the file is saved every SAVE_EVERY calls: the seller knows the last tick it took
-        code, st = self._req(f"/channel/state?channel={c.id}")
+        code, st = self._req(f"/channel/state?channel={c.id}", base=self.node if raw["terms"].get("hub") else None)
         if code == 200:
             c.spent = max(c.spent, st["paid_ticks"])
         self.channel, self.terms = c, raw["terms"]
@@ -159,6 +162,19 @@ class Client:
         code, terms = self._req("/channel/terms")
         if code != 200:
             raise PaymentError(f"no channel terms: {terms}")
+        return self._open(ticks, expires_in, terms)
+
+    def open_hub(self, ticks: int, expires_in: int = 10_000) -> str:
+        """Lock ticks*unit PMX once with the node's hub, then pay ANY seller that takes hub
+        channels from it: get("http://other-seller/route") draws on the same deposit."""
+        if self.channel:
+            raise PaymentError("a channel is already open; close it first")
+        code, hub = self._node("/hub/terms")
+        if code != 200:
+            raise PaymentError(f"the node runs no hub: {hub}")
+        return self._open(ticks, expires_in, {"seller": hub["hub"], "unit": hub["unit"], "hub": True})
+
+    def _open(self, ticks, expires_in, terms) -> str:
         led = self._ledger()
         c = channels.BuyerChannel(ticks)
         tx = c.open_tx(led, self.wallet, terms["seller"], terms["unit"], expires_in)
@@ -179,7 +195,8 @@ class Client:
         """Ask the seller to settle; the unspent deposit comes back."""
         if not self.channel:
             raise PaymentError("no open channel")
-        code, body = self._req("/channel/close", {"channel": self.channel.id})
+        code, body = self._req("/channel/close", {"channel": self.channel.id},
+                               base=self.node if self.terms.get("hub") else None)
         if code != 200:
             raise PaymentError(f"close refused: {body}")
         self.channel = None
@@ -188,18 +205,28 @@ class Client:
 
     # --- paid calls ---
     def get(self, path: str):
-        """GET a route, paying for it if it asks. Returns (status, json)."""
+        """GET a route, paying for it if it asks. Returns (status, json). `path` is a route
+        of this API, or a full URL of another seller (with a hub channel, the same deposit)."""
         price = self.prices.get(path)
-        if self.channel and price is not None:
+        if self.channel and price is not None and self._channel_fits(path):
             return self._via_channel(path, price)
         code, body = self._req(path)
         if code != 402:
             return code, body
         offers = self._offers(path)
         self.prices[path] = price = int(offers["tx"]["amount"])
-        if self.channel:
+        if self.channel and self._channel_fits(path):
             return self._via_channel(path, price)
         return self._on_chain(path, offers["tx"])
+
+    def _channel_fits(self, path) -> bool:
+        """Can our open channel pay this route? A direct channel pays its own seller; a hub
+        channel pays any seller whose 402 names that hub."""
+        offers = self.offers.get(path)
+        if offers is None:  # no x402 offer seen: the old behaviour, our own API only
+            return not path.startswith(("http://", "https://"))
+        ch = offers.get("channel")
+        return ch is not None and self.terms["seller"] in (ch.get("payTo"), ch.get("extra", {}).get("hub"))
 
     def _offers(self, path) -> dict:
         """The paymesh entries of this 402's PAYMENT-REQUIRED header, by transfer method."""

@@ -30,6 +30,7 @@ DIFFICULTY = 2  # hash must start with this many zeros; tuned so block time < 1s
 CHAIN_FILE = os.path.join(wallets.HOME, "chain.json")
 FAUCET = "0" * 64  # only the faucet may send unsigned txs
 MAX_MEMO = 256
+MAX_SPLITS = 64  # payees in one channel_close (a hub paying the sellers a channel bought from)
 FAUCET_MAX = 100  # PMX per faucet mint
 CKPT_EVERY = 500  # blocks between ledger checkpoints (chain.json.ckpt)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -39,7 +40,7 @@ _BASE = {"from_wallet", "to_wallet", "amount", "memo", "txid"}
 _SIGNED = _BASE | {"next_key", "sig", "pub", "kind"}
 FIELDS = {"faucet": _BASE | {"kind"}, "pay": _SIGNED,
           "channel_open": _SIGNED | {"anchor", "ticks", "unit", "expires"},
-          "channel_close": _SIGNED | {"channel", "ticks", "word"},
+          "channel_close": _SIGNED | {"channel", "ticks", "word", "splits"},
           "channel_refund": _SIGNED | {"channel"}}
 FORMAT = 3  # chain.json: a {"format": 3} line, then one block per line (append-only)
 
@@ -163,6 +164,17 @@ class Ledger:
                 raise ValueError("word does not hash to the channel anchor in that many ticks")
             if amt != i * ch["unit"]:
                 raise ValueError("channel_close amount must equal ticks * unit")
+            if "splits" in tx:
+                sp = tx["splits"]
+                if not isinstance(sp, dict) or not 1 <= len(sp) <= MAX_SPLITS:
+                    raise ValueError(f"splits must map 1..{MAX_SPLITS} payees to amounts")
+                for who, part in sp.items():
+                    if not isinstance(who, str) or not HEX64.match(who) or who == FAUCET:
+                        raise ValueError("a split payee must be a 64-hex address")
+                    if type(part) is not int or part <= 0:
+                        raise ValueError("a split must be a whole number of PMX above 0")
+                if sum(sp.values()) != amt:
+                    raise ValueError("splits must add up to the amount")
             self._signed_by(tx, frm)
             return
         if kind == "channel_refund":
@@ -233,9 +245,12 @@ class Ledger:
         elif kind == "channel_close":
             ch = self.channels[tx["channel"]]
             deposit = ch["n"] * ch["unit"]
-            self.balances[ch["seller"]] = self.balances.get(ch["seller"], 0) + amt
+            for who, part in (tx.get("splits") or {ch["seller"]: amt}).items():
+                self.balances[who] = self.balances.get(who, 0) + part  # a hub pays its sellers here
             self.balances[ch["buyer"]] = self.balances.get(ch["buyer"], 0) + deposit - amt
             ch.update(open=False, paid=amt)
+            if "splits" in tx:
+                ch["splits"] = dict(tx["splits"])
         elif kind == "channel_refund":
             ch = self.channels[tx["channel"]]
             self.balances[frm] = self.balances.get(frm, 0) + amt

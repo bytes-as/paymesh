@@ -75,12 +75,15 @@ def requirement(network: str, pay_to: str, amount: int, method: str, timeout: in
             "extra": dict(extra, assetTransferMethod=method, paymentFlow=FLOW)}
 
 
-def paymesh_accepts(network: str, pay_to: str, price: int, challenge: dict, unit: int, node: str = "") -> list:
-    """The two ways to pay a route: a tx carrying this challenge's memo, or a channel tick."""
+def paymesh_accepts(network: str, pay_to: str, price: int, challenge: dict, unit: int, node: str = "",
+                    hub: str = "") -> list:
+    """The two ways to pay a route: a tx carrying this challenge's memo, or a channel tick
+    (from a channel to this seller, or to `hub`, whose channels any seller takes)."""
     t = challenge["expires_in"]
     on_chain = requirement(network, pay_to, price, "tx", t, memo=challenge["memo"], nonce=challenge["nonce"],
                            **({"node": node} if node else {}))
-    return [on_chain, requirement(network, pay_to, price, "channel", t, unit=unit, terms="/channel/terms")]
+    return [on_chain, requirement(network, pay_to, price, "channel", t, unit=unit, terms="/channel/terms",
+                                  **({"hub": hub} if hub else {}))]
 
 
 def payment_required(url: str, accepts: list, error: str = "PAYMENT-SIGNATURE header is required",

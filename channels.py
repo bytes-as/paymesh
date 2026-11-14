@@ -68,6 +68,15 @@ class SellerBook:
     Each accepted payment appends one line "<channel> <i> <word>" before the
     call is served, so a restarted seller never takes a spent word again.
     The log is compacted to one line per channel when it grows.
+
+    Hub mode: the book of a hub (the node) takes words of channels opened to
+    the hub on behalf of any seller, with accept(..., payee=seller). Each such
+    line also names the payee and the PMX it earned ("<channel> <i> <word>
+    <payee> <amount>"), one atomic line; the hub's channel_close then pays
+    every payee its share (`splits`). One counter per channel, so a word can
+    only ever pay one seller. A seller's own book forwards words of a hub's
+    channels to the hub: set `hub` to claim(channel_seller, header, price) ->
+    (ok, reason), or None when channel_seller is no hub it knows.
     """
 
     COMPACT_AT = 50_000  # lines
@@ -79,6 +88,8 @@ class SellerBook:
         self.seller = seller_address
         self.lock = threading.Lock()
         self.book: dict = {}
+        self.credits: dict = {}  # hub mode: channel -> {payee: PMX}
+        self.hub = None
         self._lines = 0
         cut = durable.repair_tail(path, lambda raw: _record_ok(raw.decode("utf-8", "replace")))
         if cut:
@@ -88,25 +99,37 @@ class SellerBook:
                 for line in f:
                     if not _record_ok(line):
                         continue  # never take a damaged record as the best word
-                    cid, i, w = line.split()
-                    if int(i) > self.book.get(cid, {"i": 0})["i"]:
-                        self.book[cid] = {"i": int(i), "w": w}
+                    parts = line.split()
+                    cid, i, w = parts[0], int(parts[1]), parts[2]
+                    if i > self.book.get(cid, {"i": 0})["i"]:
+                        self.book[cid] = {"i": i, "w": w}
+                    if len(parts) == 5:  # every credit line counts (compaction writes totals)
+                        cr = self.credits.setdefault(cid, {})
+                        cr[parts[3]] = cr.get(parts[3], 0) + int(parts[4])
                     self._lines += 1
         self.log = durable.AppendLog(path)  # fsync policy: durable.py
 
-    def _record(self, cid: str, i: int, w: str):
-        self.log.append(f"{cid} {i} {w}")
+    def _record(self, cid: str, i: int, w: str, payee: str | None = None, amount: int = 0):
+        self.log.append(f"{cid} {i} {w}" + (f" {payee} {amount}" if payee else ""))
         self._lines += 1
         if self._lines > self.COMPACT_AT:
-            data = "".join(f"{c} {v['i']} {v['w']}\n" for c, v in self.book.items()).encode()
+            out = []
+            for c, v in self.book.items():
+                cr = self.credits.get(c)
+                if cr:
+                    out += [f"{c} {v['i']} {v['w']} {who} {amt}\n" for who, amt in cr.items()]
+                else:
+                    out.append(f"{c} {v['i']} {v['w']}\n")
+            data = "".join(out).encode()
             self.log.reopen(lambda: durable.atomic_write(self.path, data, sync=durable.POLICY != "off"))
-            self._lines = len(self.book)
+            self._lines = len(out)
 
     def close(self):
         self.log.close()
 
-    def accept(self, chain_, header: str, price: int) -> tuple[bool, str]:
-        """Check an X-Channel header pays `price` PMX; record it if so."""
+    def accept(self, chain_, header: str, price: int, payee: str | None = None) -> tuple[bool, str]:
+        """Check an X-Channel header pays `price` PMX; record it if so. payee: hub mode, the
+        seller this word pays (the hub credits it)."""
         parts = (header or "").split()
         # isdigit() alone takes '²' (latin-1 in a header), which int() refuses: ASCII digits only
         if len(parts) != 3 or not (parts[1].isascii() and parts[1].isdigit()):
@@ -122,7 +145,13 @@ class SellerBook:
         if not c["open"]:
             return False, "channel already settled"
         if c["seller"] != self.seller:
+            if payee is None and self.hub is not None:
+                res = self.hub(c["seller"], f"{cid} {i} {w}", price)
+                if res is not None:  # a hub's channel: the hub takes the word for us
+                    return res
             return False, "channel pays someone else"
+        if payee is not None and (not isinstance(payee, str) or not ch.HEX64.match(payee) or payee == ch.FAUCET):
+            return False, "payee must be a 64-hex address"
         height = getattr(chain_, "height", None)
         if height is not None and c["expires"] - height <= self.stop_within:
             # the buyer may refund from `expires` on: a tick taken now might never be settled
@@ -131,20 +160,27 @@ class SellerBook:
             last = self.book.get(cid, {"i": 0, "w": c["anchor"]})
             if not last["i"] < i <= c["n"]:
                 return False, f"tick {i} not after the last paid tick {last['i']} (max {c['n']})"
-            if (i - last["i"]) * c["unit"] < price:
-                return False, f"pays {(i - last['i']) * c['unit']} PMX, price is {price}"
+            paid = (i - last["i"]) * c["unit"]
+            if paid < price:
+                return False, f"pays {paid} PMX, price is {price}"
             if ch.hash_word(w, i - last["i"]) != last["w"]:
                 return False, "word is not on this channel's hash chain"
+            if payee is None and self.credits.get(cid):
+                return False, "a hub channel pays only through the hub"
             self.book[cid] = {"i": i, "w": w}
-            self._record(cid, i, w)
-        return True, f"paid {(i - last['i']) * c['unit']} PMX on channel {cid[:12]} (tick {i}/{c['n']})"
+            if payee is not None:
+                cr = self.credits.setdefault(cid, {})
+                cr[payee] = cr.get(payee, 0) + paid
+            self._record(cid, i, w, payee, paid)
+        return True, f"paid {paid} PMX on channel {cid[:12]} (tick {i}/{c['n']})"
 
     def best(self, cid: str):
         with self.lock:
             return self.book.get(cid)
 
     def close_tx(self, chain_, seller_wallet, cid: str) -> dict:
-        """A signed channel_close claiming the best word seen."""
+        """A signed channel_close claiming the best word seen; in hub mode it pays every
+        seller its share (splits)."""
         c = chain_.ledger.channels.get(cid)
         b = self.best(cid)
         if c is None or not c["open"]:
@@ -153,6 +189,12 @@ class SellerBook:
             raise ValueError("nothing paid on this channel yet; the buyer can refund it after expiry")
         tx = chain_.new_tx(self.seller, c["buyer"], b["i"] * c["unit"], "channel:close")
         tx.update(kind="channel_close", channel=cid, ticks=b["i"], word=b["w"])
+        with self.lock:
+            cr = dict(self.credits.get(cid) or {})
+        if cr:
+            if sum(cr.values()) != tx["amount"]:
+                raise ValueError(f"hub credits {sum(cr.values())} PMX differ from the {tx['amount']} PMX revealed")
+            tx["splits"] = cr
         wallets.sign_tx(tx, seller_wallet, chain_)
         return tx
 
@@ -165,10 +207,16 @@ class SellerBook:
 
 
 def _record_ok(line: str) -> bool:
-    """A complete seller-log record: '<64 hex channel> <ASCII digits> <64 hex word>'."""
+    """A complete log record: '<64 hex channel> <digits> <64 hex word>', in hub mode
+    followed by '<64 hex payee> <digits>'."""
     parts = line.split()
-    return (len(parts) == 3 and ch.HEX64.match(parts[0]) is not None and parts[1].isascii()
-            and parts[1].isdigit() and ch.HEX64.match(parts[2]) is not None)
+    if len(parts) not in (3, 5):
+        return False
+    ok = (ch.HEX64.match(parts[0]) is not None and parts[1].isascii() and parts[1].isdigit()
+          and ch.HEX64.match(parts[2]) is not None)
+    if len(parts) == 5:
+        ok = ok and ch.HEX64.match(parts[3]) is not None and parts[4].isascii() and parts[4].isdigit()
+    return ok
 
 
 def refund_tx(chain_, wallet, cid: str) -> dict:

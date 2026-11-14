@@ -102,6 +102,8 @@ LIMITS = RateLimit({"faucet": _limit("faucet", 200, 2), "tx": _limit("tx", 2000,
 chain_inst: chain.Chain
 SELLER: wallets.Wallet
 BOOK: channels.SellerBook
+HUB_WALLET: wallets.Wallet  # the hub: one buyer deposit, spent at any seller (see channels.SellerBook)
+HUB: channels.SellerBook
 NETWORK = ""  # x402 network id, set by start() from the genesis hash
 
 
@@ -159,7 +161,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if refused:
             ch["error"] = f"payment refused: {refused.get('errorMessage', refused['errorReason'])}"
         host = self.headers.get("Host") or f"{HOST}:{PORT}"
-        required = x402.payment_required(f"http://{host}{path}", x402.paymesh_accepts(NETWORK, SELLER.address, price, ch, CHANNEL_UNIT),
+        required = x402.payment_required(f"http://{host}{path}", x402.paymesh_accepts(NETWORK, SELLER.address, price, ch, CHANNEL_UNIT,
+                                                                                     hub=HUB_WALLET.address),
                                          error=ch["error"] if refused else "PAYMENT-SIGNATURE header is required")
         body = json.dumps(ch).encode()
         self.send_response(402)  # Payment Required
@@ -252,12 +255,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if c is None:
                 self._send(404, {"error": "unknown channel"})
                 return
-            b = BOOK.best(cid) or {"i": 0}
+            b = _book_for(c)[0].best(cid) or {"i": 0}
             self._send(200, {"channel": cid, "open": c["open"], "ticks": c["n"], "unit": c["unit"],
                              "paid_ticks": b["i"], "expires": c["expires"]})
             return
         if self.path.startswith("/channel/terms"):
             self._send(200, _terms())
+            return
+        if self.path.startswith("/hub/terms"):
+            self._send(200, {"hub": HUB_WALLET.address, "unit": CHANNEL_UNIT, "currency": CURRENCY,
+                             "max_ticks": chain.MAX_TICKS, "open": "POST /tx a signed channel_open to the hub",
+                             "claim": "POST /hub/claim {channel, tick, word, seller, price} (sellers)",
+                             "close": "POST /channel/close {channel}: one channel_close pays every seller (splits)"})
             return
         if self.path.startswith("/open/info"):
             self._send(200, {"service": "paymesh demo API", "currency": CURRENCY,
@@ -298,6 +307,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self._send(200, {"accepted": True, "txid": tx["txid"], "block": blk.index})
             print(f"[api] tx {tx['txid'][:16]}.. mined in block {blk.index}")
+            return
+        if self.path.startswith("/hub/claim"):
+            # a seller hands the hub a word a buyer paid it with; the hub credits that seller
+            if self._limited("challenge"):
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if not 0 < length <= 4096:
+                    self.close_connection = True
+                    raise ValueError("body must be 1..4096 bytes")
+                q = json.loads(self.rfile.read(length).decode())
+                if not isinstance(q, dict):
+                    raise ValueError("body must be an object")
+                cid, tick, word, payee, price = (q.get(k) for k in ("channel", "tick", "word", "seller", "price"))
+                if not (isinstance(cid, str) and type(tick) is int and tick > 0 and isinstance(word, str)
+                        and isinstance(payee, str) and type(price) is int and price > 0):
+                    raise ValueError("claim is {channel, tick: int > 0, word, seller, price: int > 0}")
+            except (ValueError, UnicodeDecodeError) as e:
+                self._send(400, {"error": f"claim refused: {e}"})
+                return
+            ok, why = HUB.accept(chain_inst, f"{cid} {tick} {word}", price, payee=payee)
+            if not ok:
+                self._send(402, {"error": "hub claim refused", "reason": why})
+                return
+            self._send(200, {"ok": True, "reason": why, "seller": payee})
             return
         if self.path.startswith("/channel/close"):
             # settle a channel at the best word the seller holds (anyone may ask: it
@@ -343,7 +377,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def _terms() -> dict:
-    return {"seller": SELLER.address, "unit": CHANNEL_UNIT, "currency": CURRENCY,
+    return {"seller": SELLER.address, "hub": HUB_WALLET.address, "unit": CHANNEL_UNIT, "currency": CURRENCY,
             "max_ticks": chain.MAX_TICKS, "open": "POST /tx a signed channel_open (see channels.py)",
             "pay": "X-Channel: <channel id> <tick> <word>", "close": "POST /channel/close {channel}"}
 
@@ -356,13 +390,15 @@ def submit_and_wait(tx) -> "chain.Block":
         raise ValueError("faucet mints come from GET /faucet only")
     cid = tx.get("channel")
     c = chain_inst.ledger.channels.get(cid) if tx.get("kind") == "channel_refund" and isinstance(cid, str) else None
-    if c and c["open"] and c["seller"] == SELLER.address and BOOK.best(cid):
-        # this node is the seller and the miner: settle what the buyer spent before a refund can take it back
+    ours = c is not None and c["seller"] in (SELLER.address, HUB_WALLET.address)
+    if c and c["open"] and ours and _book_for(c)[0].best(cid):
+        # this node is the seller (or the hub) and the miner: settle what the buyer spent
+        # before a refund can take it back
         try:
             settle(cid)
         except ValueError as e:
             print(f"[api] settle {cid[:12]} before refund failed: {e}")
-    elif c and c["open"] and c["seller"] != SELLER.address:
+    elif c and c["open"] and not ours:
         # a seller running apart can't front-run (blocks are cheap: a buyer can mine past its
         # 2 s settler). Hold the refund so it can settle first; whichever lands first counts.
         deadline = time.monotonic() + REFUND_HOLD_S
@@ -385,9 +421,24 @@ def submit_and_wait(tx) -> "chain.Block":
     return chain_inst.blocks[chain_inst.where[tx["txid"]]]
 
 
+def _book_for(c) -> tuple:
+    """(book, signing wallet) for a channel: the hub's or this node's own seller's."""
+    return (HUB, HUB_WALLET) if c and c["seller"] == HUB_WALLET.address else (BOOK, SELLER)
+
+
+def _hub_claim(payee: str):
+    """For a seller's book: take words of hub channels through the hub, crediting `payee`."""
+    def claim(channel_seller, header, price):
+        if channel_seller != HUB_WALLET.address:
+            return None
+        return HUB.accept(chain_inst, header, price, payee=payee)
+    return claim
+
+
 def settle(cid: str):
     with chain_lock:
-        tx = BOOK.close_tx(chain_inst, SELLER, cid)
+        book, wallet = _book_for(chain_inst.ledger.channels.get(cid))
+        tx = book.close_tx(chain_inst, wallet, cid)
         chain_inst.add_tx(tx)
         blk = chain_inst.mine()
     with mined:
@@ -414,7 +465,7 @@ def _miner(stop: threading.Event):
 def _settler(stop: threading.Event):
     """Settle paid channels before they expire, so the buyer can't refund what it spent."""
     while not stop.wait(2.0):
-        for cid in BOOK.expiring(chain_inst, SETTLE_WITHIN):
+        for cid in BOOK.expiring(chain_inst, SETTLE_WITHIN) + HUB.expiring(chain_inst, SETTLE_WITHIN):
             try:
                 settle(cid)
             except ValueError as e:
@@ -422,11 +473,15 @@ def _settler(stop: threading.Event):
 
 
 def start(chain_: chain.Chain, port=PORT) -> http.server.ThreadingHTTPServer:
-    global chain_inst, SELLER, BOOK, NETWORK
+    global chain_inst, SELLER, BOOK, NETWORK, HUB_WALLET, HUB
     chain_inst = chain_
     NETWORK = x402.network_id(chain_.blocks[0].hash())
     SELLER = wallets.load_or_create("seller")
-    BOOK = channels.SellerBook(os.path.join(os.path.dirname(os.path.abspath(chain_.path)), "seller_channels.json"), SELLER.address)
+    home = os.path.dirname(os.path.abspath(chain_.path))
+    BOOK = channels.SellerBook(os.path.join(home, "seller_channels.json"), SELLER.address)
+    HUB_WALLET = wallets.load_or_create("hub")
+    HUB = channels.SellerBook(os.path.join(home, "hub_channels.log"), HUB_WALLET.address)
+    BOOK.hub = _hub_claim(SELLER.address)  # this node's own API also takes hub channels
     httpd = http.server.ThreadingHTTPServer((HOST, port), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     # a fast start trusted the checkpoint: re-check those blocks in full meanwhile

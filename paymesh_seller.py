@@ -16,6 +16,7 @@ Stdlib only.
 import http.client
 import json
 import os
+import socket
 import threading
 import time
 import urllib.parse
@@ -24,6 +25,16 @@ import channels
 import paywall as _pw
 import wallets
 import paymesh_x402 as x402
+def _conn(u, timeout):
+    """A kept-alive connection to the node: connect blocking, then the timeout (a timed connect
+    costs ~15 ms on Windows), and TCP_NODELAY (no Nagle wait on small requests)."""
+    c = http.client.HTTPConnection(u.hostname, u.port or 80)
+    c.sock = socket.create_connection((u.hostname, u.port or 80))
+    c.sock.settimeout(timeout)
+    c.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    return c
+
+
 class _Node:
     """Just enough of a chain for paywall.py and channels.py, read from the node over HTTP."""
 
@@ -43,7 +54,7 @@ class _Node:
         for attempt in range(2):
             c = getattr(self._tl, "c", None)
             if c is None:
-                c = self._tl.c = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=self.timeout)
+                c = self._tl.c = _conn(u, self.timeout)
             try:
                 c.request("GET", u.path + path)
                 r = c.getresponse()
@@ -55,8 +66,26 @@ class _Node:
                 if attempt:
                     raise
 
-    def post(self, path, obj):
+    def post(self, path, obj, keep_alive: bool = False):
+        """keep_alive: reuse this thread's connection (hub claims, one per paid call). A reused
+        connection the node closed while idle is retried once on a new one; that request never
+        reached the node. Txs keep a fresh connection: never sent twice."""
         u = urllib.parse.urlsplit(self.url)
+        if keep_alive:
+            for attempt in range(2):
+                c = getattr(self._tl, "pc", None)
+                fresh = c is None
+                if fresh:
+                    c = self._tl.pc = _conn(u, self.timeout)
+                try:
+                    c.request("POST", u.path + path, body=json.dumps(obj), headers={"Content-Type": "application/json"})
+                    r = c.getresponse()
+                    return r.status, json.loads(r.read().decode() or "null")
+                except (http.client.HTTPException, OSError):
+                    c.close()
+                    self._tl.pc = None
+                    if fresh or attempt:
+                        raise
         c = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=self.timeout)
         try:
             c.request("POST", u.path + path, body=json.dumps(obj), headers={"Content-Type": "application/json"})
@@ -125,6 +154,17 @@ class _Node:
             raise ValueError(f"node: {body}")
         return body
 
+    @property
+    def hub(self) -> str:
+        """The node's hub address ("" if it runs none), asked once."""
+        if getattr(self, "_hub", None) is None:
+            try:
+                code, body = self._get("/hub/terms")
+                self._hub = body["hub"] if code == 200 and isinstance(body, dict) else ""
+            except (OSError, KeyError, ValueError):
+                return ""  # ask again next time
+        return self._hub
+
 
 class _Signer:
     """A ledger stand-in for wallets.sign_tx: the node says which key signs next."""
@@ -146,9 +186,25 @@ class Paywall:
         self.unit = unit
         self.book = channels.SellerBook(book_path or os.path.join(wallets.WALLET_DIR, f"{self.wallet.name}.channels.log"),
                                         self.wallet.address)
+        self.book.hub = self._hub_claim  # words of the node's hub channels go to the hub, credited to us
         self.settle_within = settle_within
         self.stop = threading.Event()
         threading.Thread(target=self._settler, daemon=True).start()
+
+    def _hub_claim(self, channel_seller: str, header: str, price: int):
+        """A word from a channel opened to the node's hub: the hub takes it and credits this
+        seller; it pays us in the channel_close (splits). None: not a hub channel."""
+        if not channel_seller or channel_seller != self.node.hub:
+            return None
+        cid, tick, word = header.split()
+        try:
+            code, res = self.node.post("/hub/claim", {"channel": cid, "tick": int(tick), "word": word,
+                                                      "seller": self.wallet.address, "price": price}, keep_alive=True)
+        except OSError as e:
+            return False, f"hub unreachable: {e}"
+        if code == 200:
+            return True, (res or {}).get("reason", "paid through the hub")
+        return False, f"hub: {(res or {}).get('reason') or res}"
 
     # --- the check, framework-agnostic ---
     def terms(self) -> dict:
@@ -196,7 +252,8 @@ class Paywall:
         if refused:
             body["error"] = f"payment refused: {refused.get('errorMessage', refused['errorReason'])}"
         required = x402.payment_required(url or path, x402.paymesh_accepts(self.node.network, self.wallet.address, price,
-                                                                             body, self.unit, node=self.node.url),
+                                                                             body, self.unit, node=self.node.url,
+                                                                             hub=self.node.hub),
                                          error=body["error"] if refused else "PAYMENT-SIGNATURE header is required")
         return False, 402, body, out + [(x402.REQUIRED, x402.encode(required))]
 

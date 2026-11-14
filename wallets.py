@@ -159,7 +159,7 @@ def pubkey_fingerprint(pub: list) -> str:
     return sha256_hex("".join(pub).encode())
 
 
-EXTRA_FIELDS = ("kind", "anchor", "ticks", "unit", "expires", "channel", "word")
+EXTRA_FIELDS = ("kind", "anchor", "ticks", "unit", "expires", "channel", "word", "splits")
 
 
 def _msg_digest(tx: dict) -> bytes:
