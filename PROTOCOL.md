@@ -249,11 +249,17 @@ channel to that seller (155 against 319 calls/s; most of the base cost is
 | `GET /hub/terms` | `{"hub", "unit", "max_ticks", ...}`: open a channel to `hub` to pay any seller (1c) |
 | `POST /hub/claim` | a seller's claim of a hub channel word: `200 {"ok"}` or `402 {"reason"}` (1c) |
 | `GET /stats` | paid calls and PMX per route, on-chain / channel, distinct payers |
-| any of `/faucet`, `/tx`, a 402 challenge | `429 {"error": "too many requests", "retry_after_s"}` with `Retry-After` when a client is over its limit |
+| `GET /channel/terms` | `{"seller", "hub", "unit", ...}`: open a direct channel to `seller` (1b) |
+| `GET /channel/state?channel=<id>` | the last tick this seller accepted: a restarted buyer resumes from it (1b) |
+| `POST /channel/close {"channel"}` | settle a channel at its best word (anyone may ask; 1b, 1c) |
+| `GET /supported`, `POST /verify`, `POST /settle` | the x402 facilitator (0b) |
+| `OPTIONS <paid route>` | CORS preflight: `204` on paid routes, `403` elsewhere (0c) |
+| any non-paid route, from a browser on another site | `403 {"error": "cross-site request refused: ..."}` (0c) |
+| any of `/faucet`, `/tx`, `/settle`, `/verify`, `/hub/claim`, a 402 challenge | `429 {"error": "too many requests", "retry_after_s"}` with `Retry-After` when a client is over its limit |
 
 The server speaks HTTP/1.1 with keep-alive. It binds 127.0.0.1 by default
 (`PAYMESH_API_PORT`, `PAYMESH_EXPLORER_PORT`, `PAYMESH_HOME` change ports and
-the data folder).
+the data folder; `PAYMESH_HUB_PAYOUT_S` / `_MIN` the hub's payout schedule, 1c.4).
 
 ## 3. Transactions
 
