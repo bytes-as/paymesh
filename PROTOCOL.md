@@ -44,6 +44,8 @@ both settle before the resource runs, so `extra.paymentFlow` is `upfront` (spec 
   then takes the word, and the channel id is the open's txid. This is how a client that can't post
   to `/tx` (a browser page, 0c) gets a channel. The channel offer's `extra.height`, the chain
   height, lets it set `expires`. A pending or refused open answers as a tx payment would.
+  The open may also lock the deposit for the seller's hub (`extra.hub`): that one channel
+  then pays any seller that takes hub channels (1c).
 
 `accepted` must echo this route's `scheme`, `network`, `asset`, `payTo` and `amount`.
 Answers: `200` + `PAYMENT-RESPONSE {"success": true, "transaction": <txid, or "" for a
@@ -90,7 +92,10 @@ signer (`"paymesh:*"`).
   node restarts.
 * `channel`: only words of channels opened to the node's hub (1c). The hub credits
   `payTo` and pays it in its close (splits). A direct channel can only be closed with
-  its seller's key, so the facilitator refuses it.
+  its seller's key, so the facilitator refuses it. An opening payload (`{"open", "tick",
+  "word"}`, section 0) is accepted when the open is to the hub: verify runs the ledger's
+  check of the open and checks the word against its anchor without mining anything;
+  settle mines the open, then the hub credits `payTo`.
 
 ### 0c. Browsers (CORS)
 

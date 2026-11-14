@@ -68,7 +68,9 @@ instead of signing again with a one-time key a seller has seen.
 With `new Paymesh.Client(api, wallet, save, { channelTicks: 100 })`, the first paid call to a
 seller opens a channel inside its payment. A page can't post to `/tx`, so the signed
 `channel_open` travels in `PAYMENT-SIGNATURE` and the seller mines it. Later calls pay with
-the next word of the hash chain: no transaction and no new key.
+the next word of the hash chain: no transaction and no new key. Add `hub: true` and the
+channel goes to the seller's hub instead, so one deposit pays every seller that takes hub
+channels (the node and sellers running apart).
 
 ## Charge for your own API
 
@@ -102,9 +104,9 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (128 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (131 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
-`py -3 attacks.py` runs 49 attacks against a scratch node and shows each refused.
+`py -3 attacks.py` runs 50 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
@@ -160,7 +162,8 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
   `PAYMESH_HUB_PAYOUT_S` / `_MIN`). The chain records what was paid, so no tick
   is paid twice and close and refund move only the rest. Killing the node before,
   during or after a payout loses nothing and pays nothing twice
-  (`tests/test_payout.py`, `tests/test_payout_crash.py`).
+  (`tests/test_payout.py`, `tests/test_payout_crash.py`; `tests/test_fuzz_payout.py`
+  checks conservation after every step of random runs with crashes).
 
 ## Limits (it's a proof of concept)
 
