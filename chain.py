@@ -30,14 +30,14 @@ DIFFICULTY = 2  # hash must start with this many zeros; tuned so block time < 1s
 CHAIN_FILE = os.path.join(wallets.HOME, "chain.json")
 FAUCET = "0" * 64  # only the faucet may send unsigned txs
 MAX_MEMO = 256
-MAX_SPLITS = 64
+MAX_SPLITS = 64  # payees in one channel_close (a hub paying the sellers a channel bought from)
 # refund window: from REFUND_EPOCH (block timestamps) a refund takes two channel_refund txs.
 # The first, from the expiry height on, opens a window of REFUND_WINDOW_S seconds; until the
 # buyer's second one (the claim, after the window) is mined, the seller can still close
 # with its best word, and a close cancels the refund. A seller whose settler is down or slow
 # keeps its money as long as it settles within the window: blocks are cheap, time is not.
 REFUND_EPOCH = 1794677340  # 2026-11-14 22:59 IST
-REFUND_WINDOW_S = 600  # payees in one channel_close (a hub paying the sellers a channel bought from)
+REFUND_WINDOW_S = 600
 FAUCET_MAX = 100  # PMX per faucet mint
 CKPT_EVERY = 500  # blocks between ledger checkpoints (chain.json.ckpt)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
