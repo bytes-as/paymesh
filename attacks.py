@@ -253,6 +253,16 @@ def run(node: str, restart=None) -> list:
                 lambda: fac("/settle", x402.requirement(net, shop_addr, 1, "channel", 60),
                             {"channel": cid, "tick": int(i), "word": w}),
                 lambda c, b: c == 200 and b.get("success") is False)
+    def fac_direct_open():  # a channel to the resource server itself: the facilitator can't close it
+        bc = chn.BuyerChannel(10)
+        led = me._ledger()
+        t = led.new_tx(me.wallet.address, shop_addr, 10, "channel:open")
+        t.update(kind="channel_open", anchor=bc.anchor, ticks=10, unit=1, expires=height() + 200)
+        wallets.sign_tx(t, me.wallet, led)
+        code, body = fac("/settle", x402.requirement(net, shop_addr, 1, "channel", 60), {"open": t, "tick": 1, "word": bc.words[1]})
+        return code, dict(body, mined=me._node(f"/tx?id={t['txid']}")[0])
+    attempt("facilitator: open a direct (not hub) channel inside a payment", fac_direct_open,
+            lambda c, b: c == 200 and b.get("success") is False and b["mined"] == 404)
     forged = ch.Chain.new_tx(victim.wallet.address, shop_addr, 7, "forged")
     forged.update(next_key="e" * 64, sig=["ab" * 32] * 68, fee=1)
     attempt("facilitator: settle a forged tx from a victim", lambda: fac("/settle", x402.requirement(net, shop_addr, 7, "tx", 60),
