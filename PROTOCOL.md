@@ -87,6 +87,22 @@ signer (`"paymesh:*"`).
   `payTo` and pays it in its close (splits). A direct channel can only be closed with
   its seller's key, so the facilitator refuses it.
 
+### 0c. Browsers (CORS)
+
+Paid routes (the node's priced endpoints, a seller's `prices`) answer any origin:
+`Access-Control-Allow-Origin: *` and `Access-Control-Expose-Headers: PAYMENT-REQUIRED,
+PAYMENT-RESPONSE` on every response, and a preflight `OPTIONS` gets `204` allowing `GET`
+with `PAYMENT-SIGNATURE`. This is safe because an x402 call carries no cookie or other
+ambient credential: a page can only spend what its own client signs.
+
+Every other route (`/faucet`, `/tx`, `/account`, `/channel/*`, `/hub/*`, `/verify`,
+`/settle`, `/stats`, ...) sends no CORS headers, refuses preflights (`403`), and answers
+`403` to any request a browser marks as coming from another site: `Sec-Fetch-Site`
+`cross-site` or `same-site`, or an `Origin` other than the server's own (`null`
+included). CORS alone would only hide the answer: a simple GET (`<img>`) or a
+`text/plain` POST would still be sent and act. Clients that aren't browsers send neither
+header and are unaffected.
+
 The headers below (`X-Payment`, `X-Channel`) still work.
 
 ## 1. Paying for a call (paymesh-native headers)
