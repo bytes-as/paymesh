@@ -103,6 +103,12 @@ included). CORS alone would only hide the answer: a simple GET (`<img>`) or a
 `text/plain` POST would still be sent and act. Clients that aren't browsers send neither
 header and are unaffected.
 
+A browser client (`js/paymesh.js`) therefore can't ask `/account` which key signs next.
+It counts: key 0 for a new wallet, one more after each payment answered `success` or
+`settlement_pending`. A payment refused after signing exposed that one-time key, so the
+wallet locks rather than sign anything else with it. Retire the key from a script (a
+payment to itself through `POST /tx`), as the Python client does by itself.
+
 The headers below (`X-Payment`, `X-Channel`) still work.
 
 ## 1. Paying for a call (paymesh-native headers)

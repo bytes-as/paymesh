@@ -44,6 +44,27 @@ api.close_channel()                       # one tx pays every seller its share
 The client learns each route's price from its first 402, keeps one HTTP
 connection alive, and saves its channel so it can resume after a restart.
 
+### From a web page (`js/paymesh.js`)
+
+One dependency-free JavaScript file pays an x402 route from a browser (or Node.js). It
+signs WOTS v2 payments byte for byte as `wallets.py` does (`tests/test_js_client.py`
+compares them with Node.js):
+
+```html
+<script src="paymesh.js"></script>
+<script>
+  const wallet = Paymesh.Wallet.create();   // fund wallet.address from a script or the CLI
+  const api = new Paymesh.Client("http://127.0.0.1:8402", wallet, w => localStorage.setItem("w", JSON.stringify(w)));
+  api.get("/premium/price").then(r => console.log(r.status, r.body, r.receipt));
+</script>
+```
+
+`js/demo.html` does this with buttons: serve the folder on another origin
+(`py -3 -m http.server 8410 --directory js`, open `http://localhost:8410/demo.html`).
+A page can pay, but it can't mint coins, post txs or read `/account` (PROTOCOL 0c). So the
+wallet tracks its own key index, and it locks if a payment is refused after signing,
+instead of signing again with a one-time key a seller has seen.
+
 ## Charge for your own API
 
 ```python
@@ -76,7 +97,7 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (105 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (116 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
 `py -3 attacks.py` runs 47 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
@@ -152,6 +173,8 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
 | `wallets.py` | one-time keys (WOTS v2; WOTS v1 and Lamport for old keys), rotation, signing |
 | `channels.py` | PayWord payment channels: buyer hash chain, seller log |
 | `durable.py` | append-only logs, atomic replaces, fsync policy (`PAYMESH_FSYNC`), torn-tail repair |
+| `js/paymesh.js`, `js/demo.html` | browser/Node.js client: WOTS v2 signing in JS, x402 payments; a demo page |
+| `httppool.py` | kept-alive HTTP connections shared by threads (client SDK, seller middleware) |
 | `facilitator.py` | x402 facilitator: `/verify`, `/settle`, `/supported` for the `paymesh` scheme |
 | `paymesh_x402.py` | x402 v2 wire format: `PAYMENT-REQUIRED` / `-SIGNATURE` / `-RESPONSE` for the `paymesh` scheme |
 | `paywall.py` | 402 challenges and on-chain payment checks |

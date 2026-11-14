@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>paymesh in the browser</title>
+<style>
+  body { font: 15px/1.5 "Segoe UI", system-ui, sans-serif; max-width: 860px; margin: 32px auto; padding: 0 16px;
+         background: #0f172a; color: #e2e8f0; }
+  h1 { font-size: 26px; margin: 0 0 4px; } p { color: #94a3b8; margin: 4px 0 18px; }
+  label { display: block; color: #94a3b8; font-size: 13px; margin-top: 10px; }
+  input, code { font: 13px Consolas, monospace; } input { width: 100%; padding: 6px; background: #1e293b;
+         color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
+  button { margin: 14px 8px 0 0; padding: 8px 14px; border: 0; border-radius: 6px; background: #38bdf8;
+           color: #0f172a; font-weight: 600; cursor: pointer; } button.alt { background: #f87171; }
+  #log { margin-top: 18px; background: #020617; border: 1px solid #1e293b; border-radius: 8px; padding: 12px;
+         font: 13px/1.6 Consolas, monospace; white-space: pre-wrap; min-height: 180px; }
+  .ok { color: #4ade80; } .no { color: #f87171; } .dim { color: #64748b; }
+</style>
+<h1>paymesh in the browser</h1>
+<p>This page runs on another site than the API. It signs WOTS v2 payments in JavaScript (js/paymesh.js) and pays
+an x402 route; the API's other routes stay closed to it.</p>
+<label>API</label><input id="api" value="http://127.0.0.1:8402">
+<label>this page's wallet (kept in this browser's localStorage, test coins only)</label><input id="addr" readonly>
+<div>
+  <button id="buy">Buy /premium/price</button>
+  <button id="mint" class="alt">Try to mint coins (GET /faucet)</button>
+  <button id="peek" class="alt">Try to read /account</button>
+</div>
+<div id="log"></div>
+<script src="paymesh.js"></script>
+<script>
+  const KEY = "paymesh-demo-wallet";
+  const saved = localStorage.getItem(KEY);
+  const wallet = saved ? Paymesh.Wallet.fromJSON(JSON.parse(saved)) : Paymesh.Wallet.create();
+  const save = (w) => localStorage.setItem(KEY, JSON.stringify(w));
+  save(wallet);
+  document.getElementById("addr").value = wallet.address;
+  const api = () => document.getElementById("api").value.replace(/\/+$/, "");
+  const logEl = document.getElementById("log");
+  let n = 0;
+  function log(cls, text) {
+    const line = document.createElement("div");
+    line.className = cls;
+    line.dataset.step = ++n;
+    line.textContent = text;
+    logEl.appendChild(line);
+  }
+  log("dim", `wallet ${wallet.address.slice(0, 16)}… key index ${wallet.nextIndex}` + (wallet.locked !== null ? ` (locked at ${wallet.locked})` : ""));
+
+  document.getElementById("buy").onclick = async () => {
+    const t0 = performance.now();
+    try {
+      const r = await new Paymesh.Client(api(), wallet, save).get("/premium/price");
+      const ms = (performance.now() - t0).toFixed(0);
+      if (r.paid) {
+        log("ok", `PAID ${r.status}: SYNTH/USD ${r.body.price} | receipt success=${r.receipt.success} tx ${r.receipt.transaction.slice(0, 16)}… | ${ms} ms | next key ${wallet.nextIndex}`);
+      } else {
+        log("no", `NOT PAID ${r.status}: ${(r.receipt && (r.receipt.errorMessage || r.receipt.errorReason)) || JSON.stringify(r.body)}`);
+      }
+    } catch (e) {
+      log("no", `ERROR ${e.message}`);
+    }
+  };
+  async function forbidden(label, path) {
+    try {
+      const r = await fetch(api() + path, { credentials: "omit" });
+      log("no", `${label}: READ BY THIS PAGE (${r.status}) - should not happen`);
+    } catch (e) {
+      log("ok", `${label}: REFUSED (the browser got no CORS answer: ${e.name})`);
+    }
+  }
+  document.getElementById("mint").onclick = () => forbidden("mint coins", `/faucet?address=${wallet.address}`);
+  document.getElementById("peek").onclick = () => forbidden("read /account", `/account?address=${wallet.address}`);
+</script>
