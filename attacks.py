@@ -79,6 +79,22 @@ def run(node: str, restart=None) -> list:
     attempt("move a WOTS v2 signature under another key's public seed",
             lambda: post(dict(t5, sig=[victim.wallet.key(0)[2].hex()] + t5["sig"][1:])),
             lambda c, b: c == 400 and "not signed by" in str(b))
+    # fees: 1 PMX per started 8 KB, signed over, so the chain can't be grown for free
+    attempt("send a signed tx with a fee of 0", lambda: post(signed(me, seller, 1, "free ride", fee=0)),
+            lambda c, b: c == 400 and "fee too low" in str(b))
+    t6 = signed(me, seller, 1, "fee cut", fee=2)
+    attempt("lower the fee of a signed tx (2 to 1, still above the minimum)", lambda: post(dict(t6, fee=1)),
+            lambda c, b: c == 400 and "not signed by" in str(b))
+    import json as _json
+    import secrets as _secrets
+    lam_w = wallets.Wallet("lamport-spam", _secrets.token_bytes(32), 0, None, None)  # an old 52 KB-signature key
+    os.makedirs(wallets.WALLET_DIR, exist_ok=True)
+    with open(lam_w.path, "w", encoding="utf-8") as f:
+        _json.dump({"name": lam_w.name, "v": 3, "address": lam_w.address, "next_index": 0, "seed": lam_w.seed.hex()}, f)
+    lam = Client(node, "lamport-spam")
+    lam.faucet()
+    attempt("put a 52 KB tx on chain for a 1 PMX fee", lambda: post(signed(lam, seller, 1, "big", fee=1)),
+            lambda c, b: c == 400 and "fee too low" in str(b))
     attempt("call a paid route without paying", lambda: me._req("/premium/price"), lambda c, b: c == 402)
     attempt("pay with a made-up txid", lambda: me._req("/premium/price", headers={"X-Payment": "ab" * 32}),
             lambda c, b: c == 402)
