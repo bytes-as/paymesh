@@ -32,6 +32,34 @@ ASSET = "PMX"
 FLOW = "upfront"
 SPEC = "x402 v2, x402-foundation/x402@31ce6bb (2026-11-12)"
 REQUIRED, SIGNATURE, RESPONSE = "PAYMENT-REQUIRED", "PAYMENT-SIGNATURE", "PAYMENT-RESPONSE"
+
+
+# --- browsers (CORS) ---------------------------------------------------------------------------
+# Paid routes are open to any origin: an x402 call carries its own payment and no cookie or other
+# ambient credential, so a page on another site can only spend what its own client signs. Every
+# other route refuses a request that a browser marks as coming from another site: CORS alone only
+# hides responses, while a simple GET (<img>) or a text/plain POST would still be sent and act.
+# Non-browser clients send neither header and are not affected.
+def cors_headers() -> list:
+    """On every response of a paid route: readable from any origin, x402 headers exposed."""
+    return [("Access-Control-Allow-Origin", "*"), ("Access-Control-Expose-Headers", f"{REQUIRED}, {RESPONSE}")]
+
+
+def preflight_headers() -> list:
+    """The answer to OPTIONS on a paid route: a GET with PAYMENT-SIGNATURE may be sent."""
+    return cors_headers() + [("Access-Control-Allow-Methods", "GET"), ("Access-Control-Allow-Headers", SIGNATURE),
+                             ("Access-Control-Max-Age", "600")]
+
+
+def cross_site(header, host: str):
+    """Why a request to a non-x402 route came from another site, or None. header(name) -> value."""
+    site = (header("Sec-Fetch-Site") or "").lower()
+    if site in ("cross-site", "same-site"):
+        return f"Sec-Fetch-Site: {site}"
+    origin = header("Origin")
+    if origin is not None and origin not in (f"http://{host}", f"https://{host}"):
+        return f"Origin {origin[:80]} is not this server"
+    return None
 MAX_HEADER = 48_000  # base64 chars: a WOTS-signed tx is ~6.6 K; a Lamport one goes by txid instead
 METHODS = ("tx", "channel")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")

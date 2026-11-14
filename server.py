@@ -117,6 +117,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[api] {self.address_string()} {fmt % args}")
 
+    # --- browsers: CORS on the paid routes only, other routes closed to other sites ---
+    def end_headers(self):
+        if self.__dict__.pop("cors", False):  # once per response; never leaks into the next request
+            for k, v in x402.cors_headers():
+                self.send_header(k, v)
+        super().end_headers()
+
+    def _origin_refused(self) -> bool:
+        """Mark a paid route for CORS; refuse (403, True) a browser request from another site elsewhere."""
+        if urllib.parse.urlsplit(self.path).path in PRICES:
+            self.cors = True
+            return False
+        why = x402.cross_site(self.headers.get, self.headers.get("Host") or "")
+        if why is None:
+            return False
+        self.close_connection = self.command == "POST"  # an unread body must not become the next request
+        self._send(403, {"error": f"cross-site request refused: {why}"})
+        return True
+
+    def do_OPTIONS(self):
+        """CORS preflight: answered for the paid x402 routes, refused (no CORS headers) elsewhere."""
+        self.pay_headers = []
+        if urllib.parse.urlsplit(self.path).path not in PRICES:
+            self._send(403, {"error": "no cross-origin access to this route"})
+            return
+        self.send_response(204)
+        for k, v in x402.preflight_headers():
+            self.send_header(k, v)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     # --- middleware wrapper: any handler can be guarded like this ---
     def _guard(self, path: str):
         """True if paid+verified, or a free route. Sends 402 itself otherwise."""
@@ -182,6 +213,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.pay_headers = []  # x402 headers for this response (the handler lives across keep-alive requests)
+        if self._origin_refused():
+            return
         if self.path.startswith("/health"):
             if chain_inst.corrupt:
                 self._send(503, {"status": "integrity check failed", "reason": chain_inst.corrupt})
@@ -300,6 +333,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.pay_headers = []
+        if self._origin_refused():
+            return
         if self.path.startswith("/tx") and self._limited("tx"):
             return
         if self.path.startswith("/tx"):

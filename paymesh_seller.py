@@ -292,6 +292,19 @@ class Paywall:
     def wsgi(self, app):
         def wrapped(environ, start_response):
             path = environ.get("PATH_INFO", "/")
+            if path in self.prices:  # browsers: open CORS on paid routes (x402 headers exposed)
+                if environ.get("REQUEST_METHOD") == "OPTIONS":
+                    start_response("204 No Content", x402.preflight_headers() + [("Content-Length", "0")])
+                    return [b""]
+                plain_start = start_response
+
+                def start_response(status_line, hdrs, exc_info=None):
+                    return plain_start(status_line, list(hdrs) + x402.cors_headers(), exc_info)
+            elif path in ("/channel/terms", "/channel/state", "/channel/close"):
+                why = x402.cross_site(lambda k: environ.get("HTTP_" + k.upper().replace("-", "_")),
+                                      environ.get("HTTP_HOST", ""))
+                if why:
+                    return _json(start_response, 403, {"error": f"cross-site request refused: {why}"})
             headers = {"X-Channel": environ.get("HTTP_X_CHANNEL"), "X-Payment": environ.get("HTTP_X_PAYMENT"),
                        x402.SIGNATURE: environ.get("HTTP_PAYMENT_SIGNATURE")}
             headers = {k: v for k, v in headers.items() if v is not None and (v or k == x402.SIGNATURE)}
@@ -340,7 +353,7 @@ def _new_close(seller, c, cid, b):
 
 def _json(start_response, status, obj, extra=()):
     body = json.dumps(obj).encode()
-    reason = {200: "OK", 400: "Bad Request", 402: "Payment Required", 404: "Not Found"}.get(status, "")
+    reason = {200: "OK", 400: "Bad Request", 402: "Payment Required", 403: "Forbidden", 404: "Not Found"}.get(status, "")
     start_response(f"{status} {reason}", [("Content-Type", "application/json"), ("Content-Length", str(len(body)))]
                    + list(extra))
     return [body]
