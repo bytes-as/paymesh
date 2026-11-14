@@ -86,18 +86,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/faucet"):
             # free test faucet: mint 100 PMX to a named local wallet, mine at once
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            # ?address=<64 hex> mints to any wallet (clients keep their own keys);
+            # ?name= is the demo shortcut that creates a wallet on this machine
+            addr = (q.get("address") or [""])[0].lower()
             name = (q.get("name") or ["buyer"])[0]
-            try:
-                w = wallets.load_or_create(name)
-            except ValueError as e:
-                self._send(400, {"error": str(e)})
-                return
+            if addr:
+                if not chain.HEX64.match(addr):
+                    self._send(400, {"error": "address must be 64 hex"})
+                    return
+                name = addr[:12]
+            else:
+                try:
+                    addr = wallets.load_or_create(name).address
+                except ValueError as e:
+                    self._send(400, {"error": str(e)})
+                    return
             with chain_lock:
-                chain_inst.add_tx(chain_inst.new_tx(chain.FAUCET, w.address, 100, f"faucet:{name}"))
+                chain_inst.add_tx(chain_inst.new_tx(chain.FAUCET, addr, 100, f"faucet:{name}"))
                 blk = chain_inst.mine()
-            self._send(200, {"faucet": name, "address": w.address,
+            self._send(200, {"faucet": name, "address": addr,
                              "minted": 100, "block": blk.index, "currency": CURRENCY})
             print(f"[api] faucet minted 100 PMX to '{name}' in block {blk.index}")
+            return
+        if self.path.startswith("/account"):
+            # what a client needs to sign its next tx, without reading chain.json
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            addr = (q.get("address") or [""])[0].lower()
+            if not chain.HEX64.match(addr):
+                self._send(400, {"error": "address must be 64 hex"})
+                return
+            with chain_lock:
+                info = {"address": addr, "balance": chain_inst.balance(addr), "current_key": chain_inst.current_key(addr),
+                        "height": chain_inst.height,
+                        "channels": {k: v for k, v in chain_inst.ledger.channels.items() if v["buyer"] == addr and v["open"]}}
+            self._send(200, info)
             return
         if self.path.startswith("/channel/terms"):
             self._send(200, _terms())

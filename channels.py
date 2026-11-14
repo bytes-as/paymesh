@@ -42,7 +42,7 @@ class BuyerChannel:
         """A signed channel_open tx locking ticks*unit PMX for `seller`."""
         tx = chain_.new_tx(wallet.address, seller, self.n * unit, "channel:open")
         tx.update(kind="channel_open", anchor=self.anchor, ticks=self.n, unit=unit,
-                  expires=len(chain_.blocks) + expires_in)
+                  expires=chain_.height + expires_in)
         wallets.sign_tx(tx, wallet, chain_)
         self.id = tx["txid"]
         return tx

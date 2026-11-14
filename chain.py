@@ -262,7 +262,12 @@ class Chain:
             self.genesis()
         return self.blocks[-1].hash()
 
-    def new_tx(self, from_wallet: str, to_wallet: str, amount: int, memo: str) -> dict:
+    @property
+    def height(self) -> int:
+        return len(self.blocks)
+
+    @staticmethod
+    def new_tx(from_wallet: str, to_wallet: str, amount: int, memo: str) -> dict:
         return {"from_wallet": from_wallet, "to_wallet": to_wallet,
                 "amount": amount, "memo": memo,
                 "txid": sha256_hex(f"{from_wallet}{to_wallet}{amount}{memo}{time.time_ns()}{os.urandom(8).hex()}")}
