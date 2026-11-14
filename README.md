@@ -16,7 +16,7 @@ reference x402 Python SDK: `interop/x402_reference.py`.
 ## Run it
 
 ```
-cd C:\Users\ARUN\OpenBot\Shared\paymesh
+cd paymesh
 py -3 paymesh.py start        # chain + paid API on :8402 + explorer on :8403 (background)
 py -3 buyer_agent.py          # demo: 2 calls paid on-chain, 20 through a channel, settle
 open http://127.0.0.1:8403    # explorer: stats, channels, blocks, txs, balances
