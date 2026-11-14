@@ -67,6 +67,7 @@ Runnable example: `py -3 examples/weather_api.py`.
 | paid calls per second | 296 | 2,495 | 3,511 (0 errors) |
 | latency p50 / p95 | 3.3 / 3.9 ms | 0.38 / 0.48 ms | |
 | chain bytes per call | 5,238 | 5 | |
+| fee per call | 1 PMX (burned) | 2 PMX per channel, any number of calls | |
 
 With 8 separate client processes paying on-chain the server mines 651 paid
 calls per second (pending txs share blocks). The cost of a paid tx doesn't
@@ -75,9 +76,9 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (78 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (84 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
-`py -3 attacks.py` runs 32 attacks against a scratch node and shows each refused.
+`py -3 attacks.py` runs 35 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
@@ -96,6 +97,9 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
   a signed tx, the client retires that key (a self-payment via the node) before
   signing again; the kept tx can no longer be mined. (With a balance of 0 it
   can't, and says so: fund the wallet before paying again.)
+* **Chain growth costs.** Every signed tx burns at least 1 PMX per started
+  8 KB, the signature covers the fee, and the sender must hold amount + fee;
+  PMX is conserved (minted = held + locked + burned).
 * **One hub deposit pays many sellers, each word once.** The hub keeps one
   counter per channel: a word spent at one seller is refused at every other,
   and the hub's single close pays each seller exactly what it was credited
@@ -126,7 +130,9 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
 ## Limits (it's a proof of concept)
 
 * PMX is play money: the faucet mints it for anyone, and one server is the
-  only miner, so there's no consensus and no fees.
+  only miner, so there's no consensus. Every signed tx burns a fee (1 PMX per
+  started 8 KB), but while the faucet is free its rate limit, not the fee, is
+  what bounds spam.
 * Wallet files hold their seed in plain text under `wallets/` (kept out of git)
   unless created with `wallet.py new <name> --encrypt` (scrypt + HMAC-SHA256,
   passphrase from `PAYMESH_PASSPHRASE`).

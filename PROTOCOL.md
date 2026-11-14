@@ -177,7 +177,7 @@ the data folder).
 {"from_wallet": "<addr>", "to_wallet": "<addr>", "amount": 5, "memo": "text <= 256",
  "txid": "<64 hex, unique>", "next_key": "<fingerprint of the sender's next key>",
  "kind": "pay | channel_open | channel_close | channel_refund",
- "sig": ["<64 hex>", ...], "pub": [...Lamport only...],
+ "sig": ["<64 hex>", ...], "pub": [...Lamport only...], "fee": 1,
  "anchor", "ticks", "unit", "expires"   // channel_open
  "channel", "ticks", "word", "splits"   // channel_close (splits optional) / channel_refund (channel only)
 }
@@ -194,6 +194,33 @@ when `chain.json` is loaded:
 * `channel_refund`: from the buyer to itself for the whole deposit, from the `expires` height on;
 * the faucet (address `0` x 64) mints at most 100 PMX per tx, only through `GET /faucet`.
 * a tx carries only its kind's fields (above); anything else is refused.
+* `fee` (signed, every kind but the faucet): see section 6.
+
+## 6. Fees and spam
+
+From `FEE_EPOCH` (2026-11-14 22:33 IST, block timestamps) every signed tx
+carries `fee`, a whole number of PMX of at least `ceil(size / 8192)`, at least
+1. `size` is the tx's compact JSON (sorted keys, no spaces), signature
+included. The fee is burned: no address receives it, and `GET /stats` reports
+`chain.fees_burned` and `chain.chain_bytes`. Blocks stamped before the epoch
+replay without fees, so the existing chain stays valid as it is.
+
+| tx | who pays | from |
+|---|---|---|
+| `pay`, `channel_open` | the sender | its balance: it must hold `amount + fee` |
+| `channel_close` | the seller | its share: it gets `amount - fee` (with `splits`, the splits add up to `amount - fee`; a hub takes the fee from the largest shares) |
+| `channel_refund` | the buyer | the deposit: it gets `deposit - fee` |
+
+What it costs: a WOTS tx (~5 KB) burns 1 PMX; a Lamport tx (~52 KB) 7; a
+hub close with 64 payees 2. A paid call on-chain costs its price + 1 PMX and
+adds ~5 KB to the chain. A channel costs 2 PMX (open + close) for any number
+of calls. Chain growth is therefore at most about 8 KB per PMX burned.
+
+Limits: PMX is free from the faucet (100 PMX per mint, rate-limited per IP:
+burst 200, 2 per second). While that's true, the faucet's rate limit is what
+bounds a spammer: at most ~200 PMX/s per IP, so at most ~1 MB/s of chain per
+IP. The fee makes every byte cost faucet quota rather than nothing. With a
+scarce token, the fee alone would price chain growth.
 
 ## 4. Signatures and keys
 
