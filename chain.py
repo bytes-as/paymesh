@@ -58,8 +58,24 @@ class Block:
     def header(self) -> str:
         return f"{self.index}|{self.timestamp}|{json.dumps(self.txs, sort_keys=True)}|{self.prev_hash}|{self.nonce}"
 
+    def _prefix(self):
+        """sha256 state of the header up to the nonce: proof of work only re-hashes the nonce."""
+        key = (self.index, self.timestamp, self.prev_hash, id(self.txs), len(self.txs))
+        if getattr(self, "_pkey", None) != key:
+            self._pstate = hashlib.sha256(f"{self.index}|{self.timestamp}|{json.dumps(self.txs, sort_keys=True)}|{self.prev_hash}|".encode())
+            self._pkey = key
+            self._hcache = None
+        return self._pstate
+
     def hash(self) -> str:
-        return sha256_hex(self.header())
+        """Same value as sha256(header()), computed from the cached prefix state."""
+        st = self._prefix()
+        if self._hcache is not None and self._hcache[0] == self.nonce:
+            return self._hcache[1]
+        h = st.copy()
+        h.update(str(self.nonce).encode())
+        self._hcache = (self.nonce, h.hexdigest())
+        return self._hcache[1]
 
     def to_dict(self):
         return {"index": self.index, "timestamp": self.timestamp, "txs": self.txs,
@@ -227,6 +243,7 @@ class Chain:
         self.ledger = Ledger()  # mined blocks only
         self.pledger = Ledger()  # mined blocks + pending txs
         self.lock = threading.RLock()
+        self.where: dict = {}  # txid -> index of the block holding it
         self.corrupt = None  # set when a background check finds the checkpoint lied
         self._ckpt_used = None  # (height, ledger) a fast load trusted, until verified
         if os.path.exists(self.path):
@@ -273,6 +290,7 @@ class Chain:
         if ledger is None:
             raise ValueError(f"{self.path}: invalid chain: {why}")
         self.blocks, self.ledger, self.pledger, self.pending = blocks, ledger, copy.deepcopy(ledger), []
+        self.where = {tx["txid"]: b.index for b in blocks for tx in b.txs}
         if upgrade:
             self.save()  # rewrite once as format 3
 
@@ -402,6 +420,7 @@ class Chain:
             self.ledger.height = b.index
             for tx in b.txs:
                 self.ledger.apply(tx)
+                self.where[tx["txid"]] = b.index
             self.ledger.height = self.pledger.height = len(self.blocks)
             self._append(b)
             if self.height % CKPT_EVERY == 0:
@@ -463,10 +482,13 @@ class Chain:
     def find_tx_by_id(self, txid: str):
         """The tx (if any) with this txid, inside its mined block."""
         with self.lock:
-            for b in reversed(self.blocks):
-                for tx in b.txs:
-                    if tx["txid"] == txid:
-                        return tx, b
+            n = self.where.get(txid)
+            if n is None:
+                return None, None
+            b = self.blocks[n]
+            for tx in b.txs:
+                if tx["txid"] == txid:
+                    return tx, b
         return None, None
 
 

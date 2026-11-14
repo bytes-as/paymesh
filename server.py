@@ -34,6 +34,7 @@ SETTLE_WITHIN = 20  # settle a paid channel when it expires within this many blo
 price_history = [{"t": i, "price": round(100.0 + random.random() * 10, 4)} for i in range(12)]
 
 chain_lock = threading.Lock()
+mined = threading.Condition()  # notified after every block
 chain_inst: chain.Chain
 SELLER: wallets.Wallet
 BOOK: channels.SellerBook
@@ -108,6 +109,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with chain_lock:
                 chain_inst.add_tx(chain_inst.new_tx(chain.FAUCET, addr, 100, f"faucet:{name}"))
                 blk = chain_inst.mine()
+            with mined:
+                mined.notify_all()
             self._send(200, {"faucet": name, "address": addr,
                              "minted": 100, "block": blk.index, "currency": CURRENCY})
             print(f"[api] faucet minted 100 PMX to '{name}' in block {blk.index}")
@@ -175,7 +178,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError("faucet mints come from GET /faucet only")
                 with chain_lock:
                     chain_inst.add_tx(tx)  # raises on any broken ledger rule
-                    blk = chain_inst.mine()
+                # the miner thread puts every waiting tx into its next block
+                with mined:
+                    mined.notify_all()
+                    if not mined.wait_for(lambda: tx["txid"] in chain_inst.where, timeout=15):
+                        raise ValueError("not mined in time; it stays pending")
+                blk = chain_inst.blocks[chain_inst.where[tx["txid"]]]
             except (ValueError, UnicodeDecodeError) as e:  # JSONDecodeError is a ValueError
                 self._send(400, {"error": f"tx rejected: {e}"})
                 return
@@ -223,8 +231,25 @@ def settle(cid: str):
         tx = BOOK.close_tx(chain_inst, SELLER, cid)
         chain_inst.add_tx(tx)
         blk = chain_inst.mine()
+    with mined:
+        mined.notify_all()
     print(f"[api] channel {cid[:12]} settled: {tx['amount']} PMX to seller in block {blk.index}")
     return blk, tx
+
+
+def _miner(stop: threading.Event):
+    """Mine whatever is pending. While one block is mined, new txs queue for the next,
+    so under load many txs share a block instead of each paying for its own."""
+    while not stop.is_set():
+        with mined:
+            mined.wait_for(lambda: chain_inst.pending or stop.is_set(), timeout=1.0)
+        if stop.is_set():
+            break
+        with chain_lock:
+            if chain_inst.pending:
+                chain_inst.mine()
+        with mined:
+            mined.notify_all()
 
 
 def _settler(stop: threading.Event):
@@ -248,6 +273,7 @@ def start(chain_: chain.Chain, port=PORT) -> http.server.ThreadingHTTPServer:
     threading.Thread(target=chain_.verify_checkpoint, daemon=True).start()
     httpd.settler_stop = threading.Event()
     threading.Thread(target=_settler, args=(httpd.settler_stop,), daemon=True).start()
+    threading.Thread(target=_miner, args=(httpd.settler_stop,), daemon=True).start()
     routes = "  ".join(f"{p}={v} PMX" for p, v in PRICES.items())
     print(f"[api] paymesh API on http://{HOST}:{port}  (prices: {routes})")
     return httpd
