@@ -108,30 +108,19 @@ class LedgerAttacks(Scratch):
 
 class SignatureAttacks(Scratch):
     def forge(self, victim_addr, to, tries=20000):
-        """Forge a tx from victim_addr using only secrets published on the chain."""
-        revealed = {}  # pub-hash -> secret
-        pubs = []
+        """Forge a tx from victim_addr using only signatures published on the chain:
+        for each key the victim used, hash its revealed WOTS chains forward."""
+        by_key = {}
         for tx in self.c.all_txs():
-            if tx.get("from_wallet") != victim_addr or not tx.get("sig"):
-                continue
-            pub = wallets.full_pub(tx)
-            pubs.append(pub)
-            for s in tx["sig"]:
-                revealed[wallets.sha256_hex(bytes.fromhex(s))] = s
-        for pub in pubs:  # try every key the victim has used
-            for n in range(tries // max(1, len(pubs))):
+            if tx.get("from_wallet") == victim_addr and tx.get("sig"):
+                by_key.setdefault(wallets.signer_key(tx), []).append((wallets._wots_digits(wallets._msg_digest(tx)), tx["sig"]))
+        for revealed in by_key.values():
+            for n in range(tries // max(1, len(by_key))):
                 tx = self.c.new_tx(victim_addr, to, 50, f"forged-{n}")
                 tx.update(wallets.forge_fields(self.c, victim_addr))
-                d = wallets._msg_digest(tx)
-                sig = []
-                for i in range(wallets.BITS):
-                    bit = (d[i // 8] >> (i % 8)) & 1
-                    s = revealed.get(pub[i if bit == 0 else wallets.BITS + i])
-                    if s is None:
-                        break
-                    sig.append(s)
-                if len(sig) == wallets.BITS:
-                    tx["pub"], tx["sig"] = pub, sig
+                sig = wallets.wots_forge(tx, revealed)
+                if sig is not None:
+                    tx["sig"] = sig
                     return tx
         return None
 
@@ -151,7 +140,7 @@ class SignatureAttacks(Scratch):
         seller = self.funded("seller", 0)
         a = self.pay(w, seller.address, 1, "a")
         b = self.pay(w, seller.address, 1, "b")
-        self.assertNotEqual(wallets.pubkey_fingerprint(wallets.full_pub(a)), wallets.pubkey_fingerprint(wallets.full_pub(b)))
+        self.assertNotEqual(wallets.signer_key(a), wallets.signer_key(b))
 
 
 class PaywallAttacks(Scratch):

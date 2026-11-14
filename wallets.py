@@ -25,8 +25,12 @@ import secrets
 # PAYMESH_HOME holds chain.json and wallets/ (default: this folder)
 HOME = os.environ.get("PAYMESH_HOME") or os.path.dirname(os.path.abspath(__file__))
 WALLET_DIR = os.path.join(HOME, "wallets")
-BITS = 256  # one secret pair per bit of the sha256 digest
-VERSION = 3
+BITS = 256  # Lamport: one secret pair per bit of the sha256 digest
+# Winternitz (WOTS, w=16): 64 message digits of 4 bits + 3 checksum digits,
+# each a hash chain of 15 steps. 67 x 32 bytes per signature instead of
+# Lamport's 768 x 32, and no public key on the wire: the verifier rebuilds it.
+WOTS_W, WOTS_L = 16, 67
+VERSION = 4
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_KEY_SEARCH = 20_000
@@ -50,6 +54,33 @@ def derive_key(seed: bytes, i: int):
     return [x.hex() for x in sk], [sha256_hex(x) for x in sk]
 
 
+def _chain(x: bytes, steps: int) -> bytes:
+    for _ in range(steps):
+        x = hashlib.sha256(x).digest()
+    return x
+
+
+def _wots_digits(d: bytes) -> list:
+    """64 base-16 digits of the digest plus a 3-digit checksum: raising any digit
+    (hashing a revealed chain further) must lower the checksum, which can't be undone."""
+    digits = []
+    for byte in d:
+        digits += [byte >> 4, byte & 15]
+    csum = sum(WOTS_W - 1 - x for x in digits)  # at most 960 < 16**3
+    return digits + [(csum >> 8) & 15, (csum >> 4) & 15, csum & 15]
+
+
+def derive_wots(seed: bytes, i: int):
+    """WOTS key i: (secret chain starts, public chain ends), 67 x 32 bytes each."""
+    base = seed + b"wots" + i.to_bytes(8, "big")
+    sk = [hashlib.sha256(base + j.to_bytes(2, "big")).digest() for j in range(WOTS_L)]
+    return sk, [_chain(x, WOTS_W - 1) for x in sk]
+
+
+def wots_fingerprint(pk: list) -> str:
+    return sha256_hex(b"wots1" + b"".join(pk))
+
+
 def pubkey_fingerprint(pub: list) -> str:
     """The 64-hex id of a public key (key 0's is the wallet address)."""
     return sha256_hex("".join(pub).encode())
@@ -71,22 +102,31 @@ def _bit(d: bytes, i: int) -> int:
 
 
 class Wallet:
-    def __init__(self, name: str, seed: bytes, next_index: int = 0):
+    """A chain of one-time keys. Keys from index `wots_from` on are WOTS, earlier
+    ones Lamport (wallets made before WOTS switch at their next key)."""
+
+    def __init__(self, name: str, seed: bytes, next_index: int = 0, wots_from: int | None = 0):
         self.name = check_name(name)
         self.seed = seed
         self.next_index = next_index
+        self.wots_from = wots_from
         self._cache: dict = {}
         self.address = self.key_fp(0)
 
+    def uses_wots(self, i: int) -> bool:
+        return self.wots_from is not None and i >= self.wots_from
+
     def key(self, i: int):
-        if i not in self._cache:
+        k = ("w" if self.uses_wots(i) else "l", i)
+        if k not in self._cache:
             if len(self._cache) > 8:
                 self._cache.clear()
-            self._cache[i] = derive_key(self.seed, i)
-        return self._cache[i]
+            self._cache[k] = derive_wots(self.seed, i) if k[0] == "w" else derive_key(self.seed, i)
+        return self._cache[k]
 
     def key_fp(self, i: int) -> str:
-        return pubkey_fingerprint(self.key(i)[1])
+        pub = self.key(i)[1]
+        return wots_fingerprint(pub) if self.uses_wots(i) else pubkey_fingerprint(pub)
 
     def index_of(self, fp: str) -> int:
         """Which of this wallet's keys has fingerprint fp, searching outward from the hint.
@@ -107,7 +147,7 @@ class Wallet:
 
     def to_dict(self):
         return {"name": self.name, "v": VERSION, "address": self.address,
-                "seed": self.seed.hex(), "next_index": self.next_index}
+                "seed": self.seed.hex(), "next_index": self.next_index, "wots_from": self.wots_from}
 
     def save(self):
         os.makedirs(WALLET_DIR, exist_ok=True)
@@ -136,9 +176,11 @@ def load(name: str) -> Wallet:
         raise FileNotFoundError(f"wallet '{name}' not found")
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
-    if raw.get("v") != VERSION:
+    if raw.get("v") not in (3, VERSION):
         raise LookupError(f"wallet '{name}': old format v{raw.get('v')}")
-    return Wallet(raw["name"], bytes.fromhex(raw["seed"]), int(raw.get("next_index", 0)))
+    # v3 wallets were all-Lamport: wots_from None until their next signature
+    wf = raw.get("wots_from") if raw.get("v") == VERSION else None
+    return Wallet(raw["name"], bytes.fromhex(raw["seed"]), int(raw.get("next_index", 0)), wf)
 
 
 def load_or_create(name: str) -> Wallet:
@@ -160,11 +202,18 @@ def sign_tx(tx: dict, wallet: Wallet, ledger) -> dict:
     `ledger` is the chain (anything with current_key(address)). In place; returns tx.
     """
     i = wallet.index_of(ledger.current_key(wallet.address))
+    if wallet.wots_from is None:
+        wallet.wots_from = i + 1  # a Lamport-era wallet: every key after this one is WOTS
     sk, pub = wallet.key(i)
     tx["next_key"] = wallet.key_fp(i + 1)
     d = _msg_digest(tx)
-    tx["pub"] = pub
-    tx["sig"] = [sk[i2 if _bit(d, i2) == 0 else BITS + i2] for i2 in range(BITS)]
+    if wallet.uses_wots(i):
+        tx.pop("pub", None)
+        digits = _wots_digits(d)
+        tx["sig"] = [_chain(sk[j], digits[j]).hex() for j in range(WOTS_L)]
+    else:
+        tx["pub"] = pub
+        tx["sig"] = [sk[i2 if _bit(d, i2) == 0 else BITS + i2] for i2 in range(BITS)]
     wallet.next_index = i + 1
     if os.path.exists(wallet.path):
         wallet.save()
@@ -174,17 +223,25 @@ def sign_tx(tx: dict, wallet: Wallet, ledger) -> dict:
 def verify_tx(tx: dict, expected_key: str) -> tuple[bool, str]:
     """True iff tx is signed by the key with fingerprint expected_key and commits to a next key."""
     pub, sig = tx.get("pub"), tx.get("sig")
-    if not pub or not sig:
+    if not sig:
         return False, "unsigned"
+    nk = tx.get("next_key")
+    if not isinstance(nk, str) or not HEX64.match(nk) or nk == expected_key:
+        return False, "next_key must be a new 64-hex key fingerprint"
+    if pub is None:  # WOTS: finish each chain and compare the rebuilt key's fingerprint
+        if not isinstance(sig, list) or len(sig) != WOTS_L or not all(isinstance(x, str) and HEX64.match(x) for x in sig):
+            return False, "bad signature shape"
+        digits = _wots_digits(_msg_digest(tx))
+        pk = [_chain(bytes.fromhex(sig[j]), WOTS_W - 1 - digits[j]) for j in range(WOTS_L)]
+        if wots_fingerprint(pk) != expected_key:
+            return False, "not signed by this wallet's current key (keys are one-time)"
+        return True, "ok"
     if not isinstance(pub, list) or len(pub) != 2 * BITS or not isinstance(sig, list) or len(sig) != BITS:
         return False, "bad signature shape"
     if not all(isinstance(x, str) and HEX64.match(x) for x in pub + sig):
         return False, "bad signature encoding"
     if pubkey_fingerprint(pub) != expected_key:
         return False, "not signed by this wallet's current key (keys are one-time)"
-    nk = tx.get("next_key")
-    if not isinstance(nk, str) or not HEX64.match(nk) or nk == expected_key:
-        return False, "next_key must be a new 64-hex key fingerprint"
     d = _msg_digest(tx)
     for i in range(BITS):
         if sha256_hex(bytes.fromhex(sig[i])) != pub[i if _bit(d, i) == 0 else BITS + i]:
@@ -193,8 +250,28 @@ def verify_tx(tx: dict, expected_key: str) -> tuple[bool, str]:
 
 
 # --- helpers for the attack tests: what a forger sees and controls ---
-def full_pub(tx: dict) -> list:
-    return tx["pub"]
+def signer_key(tx: dict) -> str:
+    """Fingerprint of the key that signed tx (Lamport or WOTS)."""
+    if tx.get("pub") is not None:
+        return pubkey_fingerprint(tx["pub"])
+    digits = _wots_digits(_msg_digest(tx))
+    return wots_fingerprint([_chain(bytes.fromhex(tx["sig"][j]), WOTS_W - 1 - digits[j]) for j in range(WOTS_L)])
+
+
+def wots_forge(tx: dict, revealed: list) -> list | None:
+    """What a forger can build for tx from WOTS signatures already published by
+    one key: chain j can only be hashed FORWARD from a revealed value."""
+    digits = _wots_digits(_msg_digest(tx))
+    out = []
+    for j in range(WOTS_L):
+        best = None
+        for d_rev, s in revealed:
+            if d_rev[j] <= digits[j] and (best is None or d_rev[j] > best[0]):
+                best = (d_rev[j], s[j])
+        if best is None:
+            return None
+        out.append(_chain(bytes.fromhex(best[1]), digits[j] - best[0]).hex())
+    return out
 
 
 def forge_fields(ledger, address: str) -> dict:
@@ -227,7 +304,7 @@ if __name__ == "__main__":
     for n in range(3):
         tx = c.new_tx(w.address, "c" * 64, 10, f"sig-test-{n}")
         sign_tx(tx, w, c)
-        keys.add(pubkey_fingerprint(tx["pub"]))
+        keys.add(signer_key(tx))
         c.add_tx(tx)
         c.mine()
     assert len(keys) == 3, "a key signed twice"
