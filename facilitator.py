@@ -21,6 +21,8 @@ import os
 import threading
 import time
 
+import chain as ch
+import channels
 import durable
 import paymesh_x402 as x402
 
@@ -62,7 +64,10 @@ class Facilitator:
         acc = payload.get("accepted")
         if not isinstance(acc, dict) or any(acc.get(k) != req.get(k) for k in ("scheme", "network", "asset", "payTo", "amount")):
             raise x402.Invalid("invalid_payment_requirements", "the payload's accepted entry differs from the requirements")
-        method, inner = x402.parse(x402.encode(payload), self.network, pay_to, int(amount))
+        method, inner = x402.parse(x402.encode(payload), self.network, pay_to, int(amount), hub=self.hub_address)
+        if method == "channel" and "open" in inner and inner["open"].get("to_wallet") != self.hub_address:
+            raise x402.Invalid("invalid_paymesh_channel_payment",
+                               "this facilitator settles hub channels only: open the channel to the hub", 402)
         memo = (req.get("extra") or {}).get("memo") if isinstance(req.get("extra"), dict) else None
         if method == "tx" and "transaction" in inner and memo is not None and inner["transaction"].get("memo") != memo:
             raise x402.Invalid("invalid_paymesh_challenge", "the tx memo is not the requirements' memo", 402)
@@ -79,6 +84,40 @@ class Facilitator:
             raise x402.Invalid("invalid_paymesh_payment", "the tx does not pay these requirements", 402)
         return tx
 
+    def _check_opening(self, inner, amount):
+        """An opening payload, read only: the channel_open passes the ledger's checks (signature,
+        funds, terms) and the word pays `amount` on its hash chain, far enough from expiry."""
+        op = inner["open"]
+        with self.lock:
+            self.chain.pledger.time = time.time()
+            try:
+                self.chain.pledger.check(op)
+            except ValueError as e:
+                raise x402.Invalid("invalid_transaction_state", str(e), 402) from None
+            height = self.chain.height
+        tick, n, unit = inner["tick"], op["ticks"], op["unit"]
+        if tick > n or tick * unit < amount:
+            raise x402.Invalid("invalid_paymesh_channel_payment", f"tick {tick} of {n} does not pay {amount} PMX", 402)
+        if ch.hash_word(inner["word"], tick) != op["anchor"]:
+            raise x402.Invalid("invalid_paymesh_channel_payment", "word is not on this channel's hash chain", 402)
+        if op["expires"] - height <= channels.SellerBook.STOP_WITHIN:
+            raise x402.Invalid("invalid_paymesh_channel_payment", "channel expires too soon to settle", 402)
+        return op["from_wallet"]
+
+    def _open(self, inner):
+        """Mine the channel_open of an opening payload; None, or a SettlementResponse to send."""
+        op, net = inner["open"], self.network
+        try:
+            self.submit(op)
+        except x402.Pending as e:
+            return x402.settlement(net, False, op["txid"], reason="settlement_pending", message=str(e))
+        except ValueError as e:
+            if "txid already used" not in str(e):
+                return x402.settlement(net, False, reason="invalid_transaction_state", message=str(e))
+            if self.chain.find_tx_by_id(op["txid"])[0] is None:
+                return x402.settlement(net, False, op["txid"], reason="settlement_pending", message=x402.PENDING_MSG)
+        return None
+
     def _channel_header(self, inner):
         c = self.chain.ledger.channels.get(inner["channel"])
         if c is None or c["seller"] != self.hub_address:
@@ -90,6 +129,8 @@ class Facilitator:
     def verify(self, body) -> dict:
         try:
             method, inner, req = self._parse(body)
+            if method == "channel" and "open" in inner and inner["channel"] not in self.chain.ledger.channels:
+                return {"isValid": True, "payer": self._check_opening(inner, int(req["amount"]))}
             if method == "channel":
                 header, c = self._channel_header(inner)
                 ok, why = self.hub.accept(self.chain, header, int(req["amount"]), payee=req["payTo"], dry=True)
@@ -120,6 +161,10 @@ class Facilitator:
             return x402.settlement(net, False, reason=e.reason, message=str(e))
         amount = int(req["amount"])
         if method == "channel":
+            if "open" in inner:
+                refused = self._open(inner)
+                if refused:
+                    return refused
             try:
                 header, c = self._channel_header(inner)
             except x402.Invalid as e:

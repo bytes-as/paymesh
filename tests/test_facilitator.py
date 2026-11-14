@@ -12,6 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import chain as ch  # noqa: E402
+import channels  # noqa: E402
 import facilitator  # noqa: E402
 import paymesh_x402 as x402  # noqa: E402
 import server  # noqa: E402
@@ -147,6 +148,39 @@ class Facilitator(unittest.TestCase):
         cid, i, w = d.channel.pay(7).split()
         v = self.call("POST", "/verify", self.body(self.req(method="channel"), {"channel": cid, "tick": int(i), "word": w}))[1]
         self.assertEqual((v["isValid"], v["invalidReason"]), (False, "invalid_paymesh_channel_payment"))
+
+    def test_a_hub_channel_opened_inside_the_payment(self):
+        c = Client(self.url, "fac-opener")
+        c.faucet()
+        hub = server.HUB_WALLET.address
+
+        def opening(to=hub, word_tick=7):
+            bc = channels.BuyerChannel(30)
+            led = c._ledger()
+            tx = led.new_tx(c.wallet.address, to, 30, "channel:open")
+            tx.update(kind="channel_open", anchor=bc.anchor, ticks=30, unit=1, expires=self.chain.height + 500)
+            wallets.sign_tx(tx, c.wallet, led)
+            return bc, {"open": tx, "tick": 7, "word": bc.words[word_tick]}
+        req = self.req(method="channel")
+        _, direct = opening(to=SHOP)  # a direct channel to the resource server: not the facilitator's to settle
+        v = self.call("POST", "/verify", self.body(req, direct))[1]
+        self.assertEqual((v["isValid"], v["invalidReason"]), (False, "invalid_paymesh_channel_payment"))
+        _, bad = opening(word_tick=6)  # a word that pays 6 ticks presented as 7
+        self.assertFalse(self.call("POST", "/verify", self.body(req, bad))[1]["isValid"])
+        bc, good = opening()
+        for _ in range(2):  # verify is read-only: nothing mined, the word still unspent
+            v = self.call("POST", "/verify", self.body(req, good))[1]
+            self.assertEqual(v, {"isValid": True, "payer": c.wallet.address})
+        self.assertIsNone(self.chain.find_tx_by_id(good["open"]["txid"])[0])
+        s = self.call("POST", "/settle", self.body(req, good))[1]
+        self.assertEqual((s["success"], s["payer"]), (True, c.wallet.address))
+        cid = good["open"]["txid"]
+        self.assertEqual(self.chain.ledger.channels[cid]["seller"], hub)
+        self.assertEqual(server.HUB.credits[cid], {SHOP: 7})
+        self.assertFalse(self.call("POST", "/settle", self.body(req, good))[1]["success"])  # the word is spent
+        nxt = {"channel": cid, "tick": 14, "word": bc.words[14]}
+        self.assertTrue(self.call("POST", "/settle", self.body(req, nxt))[1]["success"])
+        self.assertEqual(server.HUB.credits[cid], {SHOP: 14})
 
     def test_a_timeout_is_pending_then_settles_once(self):
         c = Client(self.url, "fac-slow")

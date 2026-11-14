@@ -198,7 +198,7 @@ class Paywall:
         sig = headers.get(x402.SIGNATURE)
         if sig is not None:
             status, resp, _ = x402.settle(sig, network=self.node.network, pay_to=self.wallet.address, price=price,
-                                          path=path, chain_=self.node, book=self.book, submit=self.node.submit)
+                                          path=path, chain_=self.node, book=self.book, submit=self.node.submit, hub=self.node.hub)
             out = [(x402.RESPONSE, x402.encode(resp))]
             if status == 200:
                 return True, 200, None, out

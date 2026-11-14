@@ -180,7 +180,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         sig = self.headers.get(x402.SIGNATURE)
         if sig is not None:  # x402 v2: PAYMENT-SIGNATURE in, PAYMENT-RESPONSE out
             status, resp, method = x402.settle(sig, network=NETWORK, pay_to=SELLER.address, price=price, path=path,
-                                               chain_=chain_inst, book=BOOK, submit=submit_and_wait, lock=chain_lock)
+                                               chain_=chain_inst, book=BOOK, submit=submit_and_wait, lock=chain_lock,
+                                               hub=HUB_WALLET.address)
             self.pay_headers = [(x402.RESPONSE, x402.encode(resp))]
             if status == 200:
                 self.paid_reason = f"x402 {method}: {price} PMX" + (f", tx {resp['transaction'][:16]}" if resp["transaction"] else "")

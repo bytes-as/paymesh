@@ -145,9 +145,10 @@ def settlement(network: str, success: bool, transaction: str = "", payer: str = 
     return r
 
 
-def parse(value: str, network: str, pay_to: str, price: int) -> tuple[str, dict]:
+def parse(value: str, network: str, pay_to: str, price: int, hub: str | None = None) -> tuple[str, dict]:
     """Check a PAYMENT-SIGNATURE against what this route quotes. Returns (method, payload);
-    raises Invalid. Nothing here touches the chain or spends anything."""
+    raises Invalid. Nothing here touches the chain or spends anything. `hub`: a channel opened
+    inside the payment may lock its deposit for this hub (whose channels pay any seller)."""
     p = decode(value)
     if p.get("x402Version") != VERSION:
         raise Invalid("invalid_x402_version", "x402Version must be 2")
@@ -172,7 +173,7 @@ def parse(value: str, network: str, pay_to: str, price: int) -> tuple[str, dict]
             if not isinstance(op, dict) or op.get("kind") != "channel_open" or not isinstance(op.get("txid"), str) \
                     or not _HEX64.match(op["txid"]) or set(payload) != {"open", "tick", "word"}:
                 raise Invalid("invalid_payload", "an opening payload is {open: <signed channel_open tx>, tick, word}")
-            if op.get("to_wallet") != pay_to:
+            if op.get("to_wallet") not in (pay_to, hub or pay_to):
                 raise Invalid("invalid_paymesh_payload_recipient_mismatch", "the channel_open pays someone else", 402)
             payload = dict(payload, channel=op["txid"])
         cid, tick, word = payload.get("channel"), payload.get("tick"), payload.get("word")
@@ -196,14 +197,15 @@ def parse(value: str, network: str, pay_to: str, price: int) -> tuple[str, dict]
     raise Invalid("invalid_payload", "tx payload is {transaction: <signed tx>} or {txid: 64 hex}")
 
 
-def settle(value: str, *, network: str, pay_to: str, price: int, path: str, chain_, book, submit, lock=None):
+def settle(value: str, *, network: str, pay_to: str, price: int, path: str, chain_, book, submit, lock=None,
+           hub: str | None = None):
     """Verify and settle one PAYMENT-SIGNATURE for `path`. Returns (status, SettlementResponse, method):
     200 paid, 400 malformed, 402 refused. A challenge or channel word is spent only on 200.
 
     chain_: find_tx_by_id and ledger.channels (a Chain, or a node seen over HTTP);
     book: channels.SellerBook; submit(tx): put a signed tx on chain (raise ValueError if refused)."""
     try:
-        method, payload = parse(value, network, pay_to, price)
+        method, payload = parse(value, network, pay_to, price, hub)
     except Invalid as e:
         return e.status, settlement(network, False, reason=e.reason, message=str(e)), None
     if method == "channel":
