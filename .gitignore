@@ -1,0 +1,8 @@
+﻿# secret keys and local state never go in git
+wallets/
+chain.json
+selftest-chain.json
+*.chain.json
+paymesh.pid
+paymesh.log
+__pycache__/
