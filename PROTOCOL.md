@@ -39,6 +39,11 @@ both settle before the resource runs, so `extra.paymentFlow` is `upfront` (spec 
   (settles) and serves. Or `{"txid": "<64 hex>"}` for a tx the client already
   mined (used for txs too big for a header, e.g. an old Lamport key).
 * `channel`: `{"channel": "<channel id>", "tick": i, "word": "<w_i, 64 hex>"}`, checked as in 1b.
+  Or `{"open": <signed channel_open>, "tick": i, "word": w_i}`, which opens the channel and pays its
+  first ticks in one request. The open must pay this route's `payTo`; the seller mines it and only
+  then takes the word, and the channel id is the open's txid. This is how a client that can't post
+  to `/tx` (a browser page, 0c) gets a channel. The channel offer's `extra.height`, the chain
+  height, lets it set `expires`. A pending or refused open answers as a tx payment would.
 
 `accepted` must echo this route's `scheme`, `network`, `asset`, `payTo` and `amount`.
 Answers: `200` + `PAYMENT-RESPONSE {"success": true, "transaction": <txid, or "" for a
