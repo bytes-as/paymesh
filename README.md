@@ -69,6 +69,7 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 `py -3 -m unittest discover -s tests` (40 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, seeded fuzzing, wallets at rest).
 `py -3 attacks.py` runs 14 attacks against a scratch node and shows each refused.
+`py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
   extended into a forgery; a spent key never verifies again.
