@@ -1,4 +1,4 @@
-"""Benchmark: paid calls per second, on-chain vs payment channel.
+"""Benchmark: paid calls per second, on-chain vs payment channel vs hub channel.
 
 Starts a separate paymesh server (its own PAYMESH_HOME and ports, never the
 live one), then a client with its own wallet folder pays for /premium/price:
@@ -50,7 +50,7 @@ def run(n_chain: int, n_chan: int):
             return os.path.getsize(os.path.join(home, "chain.json"))
 
         c = Client(url, "bench")
-        for _ in range((n_chain + n_chan) * 5 // 100 + 2):  # 5 PMX per call, 100 per faucet
+        for _ in range((n_chain + 2 * n_chan) * 5 // 100 + 3):  # 5 PMX per call, 100 per faucet
             c.faucet()
         out = {}
 
@@ -92,6 +92,29 @@ def run(n_chain: int, n_chan: int):
                           "paid_to_seller": settled["paid_to_seller"],
                           "chain_bytes_per_call": (chain_bytes() - b0) // n_chan}
         out["speedup"] = round(out["channel"]["calls_per_s"] / out["on_chain"]["calls_per_s"], 1)
+
+        # hub channel: one deposit with the node's hub (which pays any seller), n calls at this
+        # API, one close. Each word goes through the hub's book (one counter per channel); the
+        # node's own payout schedule (default: every 60 s or at 50 PMX owed) runs meanwhile.
+        b0 = chain_bytes()
+        c.open_hub(ticks=n_chan * 5)
+        c.get("/premium/price")
+        lat = []
+        t1 = time.perf_counter()
+        for _ in range(n_chan - 1):
+            t = time.perf_counter()
+            code, _ = c.get("/premium/price")
+            assert code == 200
+            lat.append(time.perf_counter() - t)
+        dt_calls = time.perf_counter() - t1
+        cid = c.channel.id
+        c.close_channel()
+        with urllib.request.urlopen(f"{url}/channel/info?id={cid}", timeout=10) as r:
+            info = json.load(r)
+        out["hub_channel"] = {"calls": n_chan, "calls_per_s": round((n_chan - 1) / dt_calls, 1),
+                              "p50_ms": round(statistics.median(lat) * 1000, 2),
+                              "p95_ms": round(sorted(lat)[int(len(lat) * 0.95) - 1] * 1000, 2),
+                              "paid_out": info.get("paid"), "chain_bytes_per_call": (chain_bytes() - b0) // n_chan}
 
         # many agents at once, each with its own wallet and channel
         import threading

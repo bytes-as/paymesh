@@ -39,7 +39,7 @@ def main():
         def bench(o):
             r = json.loads(o[o.index("{"):])
             return (f"on-chain {r['on_chain']['calls_per_s']}/s, channel {r['channel']['calls_per_s']}/s, "
-                    f"8 agents {r['parallel_channels']['calls_per_s']}/s")
+                    f"8 agents {r['parallel_channels']['calls_per_s']}/s, hub {r['hub_channel']['calls_per_s']}/s")
         results.append(step("benchmark", ["bench.py", "50", "1000"], bench))
     ok = all(results)
     print(f"\n{'ALL PASSED' if ok else 'FAILED'} ({sum(results)}/{len(results)})")
