@@ -136,6 +136,29 @@ def run(node: str, restart=None) -> list:
     attempt("x402: pay with another chain's network id",
             lambda: x402_pay(dict(o["tx"], network="paymesh:" + "0" * 32), {"txid": paid["txid"]}),
             lambda c, b: c == 400)
+    o = fresh()  # QA-PM-4: two txs for one challenge, sent at once: only one may go on chain
+    import threading
+    led = me._ledger()
+    two, txids = [], []
+    for _ in range(2):
+        t = led.new_tx(me.wallet.address, seller, 5, o["tx"]["extra"]["memo"])
+        wallets.sign_tx(t, me.wallet, led)
+        led._key = t["next_key"]  # the second signed by the next one-time key: both valid in order
+        txids.append(t["txid"])
+        two.append(x402.encode({"x402Version": 2, "accepted": o["tx"], "payload": {"transaction": t}}))
+
+    def both_at_once():
+        gate, codes = threading.Barrier(2), []
+
+        def go(h):
+            gate.wait()
+            codes.append(raw_get(node, "/premium/price", {x402.SIGNATURE: h}))
+        ts = [threading.Thread(target=go, args=(h,)) for h in two]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        return sorted(codes), sorted(me._node(f"/tx?id={i}")[0] for i in txids)  # 200 = mined, 404 = not
+    attempt("x402: pay one challenge with two txs at once", both_at_once,
+            lambda c, b: c == [200, 402] and b == [200, 404])
     attempt("x402: garbage PAYMENT-SIGNATURE",
             lambda: me._req("/premium/price", headers={x402.SIGNATURE: "e30=" * 9000}), lambda c, b: c == 400)
     kept = []  # play a seller that refuses a buyer's signed tx but keeps a copy
@@ -272,6 +295,18 @@ def run(node: str, restart=None) -> list:
                 lambda c, b: first == 200 and c == 402 and "not after the last paid tick" in str(b))
     attempt("node still healthy afterwards", lambda: me._node("/health"), lambda c, b: c == 200)
     return results
+
+
+def raw_get(node: str, path: str, headers: dict) -> int:
+    u = urllib.parse.urlsplit(node)
+    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=30)
+    try:
+        conn.request("GET", path, headers=headers)
+        r = conn.getresponse()
+        r.read()
+        return r.status
+    finally:
+        conn.close()
 
 
 def raw_post(node: str, path: str, body: bytes):

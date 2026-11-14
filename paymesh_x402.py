@@ -169,12 +169,15 @@ def settle(value: str, *, network: str, pay_to: str, price: int, path: str, chai
         return 200, settlement(network, True, "", c.get("buyer", ""), price), method
     if "transaction" in payload:
         tx = payload["transaction"]
-        ok, why = paywall.challenge_open(tx["memo"], path, pay_to, price)
-        if not ok:  # refuse before the money moves: an unusable challenge must not cost the buyer
+        # refuse before the money moves: an unusable challenge must not cost the buyer, and
+        # only one tx per challenge (reserved atomically) may go on chain
+        ok, why = paywall.reserve(tx["memo"], path, pay_to, price, tx["txid"])
+        if not ok:
             return 402, settlement(network, False, reason="invalid_paymesh_challenge", message=why), method
         try:
             submit(tx)
         except ValueError as e:
+            paywall.release(tx["memo"], tx["txid"])
             return 402, settlement(network, False, reason="invalid_transaction_state", message=str(e)), method
         txid = tx["txid"]
     else:

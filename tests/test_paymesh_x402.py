@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -195,6 +196,43 @@ class Node(unittest.TestCase):
         self.assertEqual(self.chain.current_key(c.wallet.address), c.wallet.key_fp(i + 1))
         self.assertEqual(c.balance(), 99)  # the self-payment costs only its 1 PMX fee
         self.assertEqual(c.get("/premium/price")[0], 200)  # and paying works on the next key
+
+    def test_two_txs_for_one_challenge_at_once_charge_once(self):
+        """Two PAYMENT-SIGNATUREs carrying different txs for the same challenge, sent at once
+        (QA-PM-4): the challenge is reserved by the first, the second never goes on chain."""
+        import threading
+        c = Client(self.url, "x402-twice")
+        c.faucet()
+        _, offers = self.challenge()
+        led = c._ledger()
+        heads, delay = [], {}
+        for n in range(2):
+            tx = led.new_tx(c.wallet.address, offers["tx"]["payTo"], 5, offers["tx"]["extra"]["memo"])
+            delay[tx["txid"]] = 0.3 * (n + 1)  # submitted in key order, so without the reservation both would be valid
+            wallets.sign_tx(tx, c.wallet, led)
+            led._key = tx["next_key"]  # the second is signed by the next one-time key
+            heads.append({x402.SIGNATURE: sig(offers["tx"], {"transaction": tx})})
+        gate, codes = threading.Barrier(2), []
+
+        def pay(h):
+            gate.wait()
+            codes.append(self.raw("/premium/price", h)[0])
+        real = server.submit_and_wait
+
+        def slow_submit(tx):  # widen the race: both requests check the challenge before either submits
+            time.sleep(delay.get(tx.get("txid"), 0))
+            return real(tx)
+        server.submit_and_wait = slow_submit
+        try:
+            ts = [threading.Thread(target=pay, args=(h,)) for h in heads]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+        finally:
+            server.submit_and_wait = real
+        mined = [t for t in self.chain.all_txs() if t["from_wallet"] == c.wallet.address]
+        self.assertEqual(sorted(codes), [200, 402])
+        self.assertEqual(len(mined), 1)
+        self.assertEqual(c.balance(), 100 - 5 - 1)
 
     def test_malformed_payment_signature_is_400(self):
         code, hdrs, body = self.raw("/premium/price", {x402.SIGNATURE: "not base64!"})

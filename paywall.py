@@ -82,6 +82,30 @@ def challenge_open(memo: str, path: str, recipient: str, amount: int) -> tuple[b
     return True, "open"
 
 
+def reserve(memo: str, path: str, recipient: str, amount: int, txid: str) -> tuple[bool, str]:
+    """Like challenge_open, and atomically claim the challenge for this txid: a second tx
+    for the same challenge (a retry, or two requests at once) is refused before it can
+    move the buyer's money. release() undoes it if the tx is then refused."""
+    ok, why = challenge_open(memo, path, recipient, amount)
+    if not ok:
+        return ok, why
+    with _lock:
+        ch = _open_challenges.get(memo.split(":")[1])
+        if ch is None:
+            return False, "unknown, expired or already-spent payment nonce"
+        if ch.get("reserved_by") not in (None, txid):
+            return False, "another tx is already paying this challenge"
+        ch["reserved_by"] = txid
+    return True, "reserved"
+
+
+def release(memo: str, txid: str):
+    with _lock:
+        ch = _open_challenges.get(memo.split(":")[1])
+        if ch is not None and ch.get("reserved_by") == txid:
+            ch.pop("reserved_by")
+
+
 def verify_payment(chain, headers, path: str) -> tuple[bool, str]:
     """Return (ok, reason). ok=True only when a mined tx pays this exact open challenge."""
     txid = headers.get("X-Payment", "") or ""
