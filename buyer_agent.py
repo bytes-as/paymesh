@@ -91,18 +91,37 @@ def ensure_funded(chain_: chain.Chain, wallet: wallets.Wallet, need: int) -> boo
 
 
 def main():
-    c = chain.Chain()  # read-only view of the running server's chain.json
-    w = wallets.load_or_create("buyer")
-    funded = ensure_funded(c, w, 20)
-    if funded:
-        print(f"faucet: funded '{w.name}' with 100 PMX")
-    i = 0
-    for path in ("/premium/price", "/premium/history"):
-        i += 1
-        log = buy_once(c, w, "buyer", i, path)
-        print(json.dumps(log))
-        if not log["ok"]:
+    """The demo: two calls paid on-chain, then a payment channel for many fast calls."""
+    import time
+    from paymesh_client import Client
+    api = Client(API, "buyer")
+    if api.balance() < 150:
+        for _ in range(2):
+            api.faucet()
+        print(f"faucet: funded 'buyer' to {api.balance()} PMX")
+    for path in ("/premium/price", "/premium/history"):  # on-chain: 402 -> signed tx -> retry
+        t0 = time.perf_counter()
+        code, body = api.get(path)
+        print(json.dumps({"mode": "on-chain", "endpoint": path, "status": code,
+                          "result": body.get("price", body.get("count", body.get("error"))),
+                          "ms": round((time.perf_counter() - t0) * 1000, 1)}))
+        if code != 200:
             sys.exit(1)
+    if api.channel is None:
+        cid = api.open_channel(ticks=100)  # one deposit on-chain: 100 PMX
+        print(json.dumps({"mode": "channel", "opened": cid[:16] + "...", "deposit": 100}))
+    t0 = time.perf_counter()
+    n = 0
+    while n < 20:
+        code, body = api.get("/premium/price")  # one request each, a hash-chain word as payment
+        if code != 200:
+            sys.exit(1)
+        n += 1
+    dt = time.perf_counter() - t0
+    print(json.dumps({"mode": "channel", "calls": n, "ms_per_call": round(dt / n * 1000, 2), "last_price": body["price"]}))
+    res = api.close_channel()
+    print(json.dumps({"mode": "channel", "settled": True, "paid_to_seller": res["paid_to_seller"],
+                      "refunded": 100 - res["paid_to_seller"], "block": res["block"], "balance": api.balance()}))
 
 
 if __name__ == "__main__":
