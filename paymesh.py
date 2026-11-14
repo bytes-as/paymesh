@@ -29,9 +29,7 @@ def serve_forever():
     import chain
     import server
     import explorer
-    c = chain.Chain()
-    if not c.blocks:
-        c.genesis()
+    c = chain.Chain.open_or_archive()
     server.start(c)
     explorer.start(c, prices=server.PRICES)
     try:

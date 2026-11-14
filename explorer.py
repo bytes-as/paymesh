@@ -38,18 +38,20 @@ code{color:#ffa657}
 <table id="bal"><tr><th>wallet</th><th>address</th><th>balance PMX</th></tr></table>
 <script>
 const data = DATA;
+const ESC = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+const esc = s => String(s).replace(/[&<>"']/g, ch => ESC[ch]);
 const c = document.getElementById('chain');
 [...data.blocks].reverse().forEach(b=>{
   c.insertAdjacentHTML('beforeend', `<tr><td>${b.index}</td><td><code>${b.hash.slice(0,16)}..</code></td><td><code>${b.prev_hash.slice(0,10)}..</code></td><td>${b.nonce}</td><td>${b.txs.length}</td></tr>`)});
 const t = document.getElementById('txs');
 [...data.txs].reverse().forEach(x=>{
-  t.insertAdjacentHTML('beforeend', `<tr><td><code>${x.txid.slice(0,16)}..</code></td><td><code>${x.from_wallet.slice(0,10)}..</code></td><td><code>${x.to_wallet.slice(0,10)}..</code></td><td>${x.amount}</td><td>${x.memo}</td></tr>`)});
+  t.insertAdjacentHTML('beforeend', `<tr><td><code>${x.txid.slice(0,16)}..</code></td><td><code>${x.from_wallet.slice(0,10)}..</code></td><td><code>${x.to_wallet.slice(0,10)}..</code></td><td>${esc(x.amount)}</td><td>${esc(x.memo)}</td></tr>`)});
 const p = document.getElementById('prices');
 Object.entries(data.prices||{}).forEach(([r,v])=>{
-  p.insertAdjacentHTML('beforeend', `<tr><td><code>${r}</code></td><td class="ok">${v}</td></tr>`)});
+  p.insertAdjacentHTML('beforeend', `<tr><td><code>${esc(r)}</code></td><td class="ok">${esc(v)}</td></tr>`)});
 const b = document.getElementById('bal');
 Object.entries(data.balances).forEach(([a,v])=>{
-  b.insertAdjacentHTML('beforeend', `<tr><td>${data.names[a]||'?'}</td><td><code>${a.slice(0,16)}..</code></td><td class="ok">${v}</td></tr>`)});
+  b.insertAdjacentHTML('beforeend', `<tr><td>${esc(data.names[a]||'?')}</td><td><code>${a.slice(0,16)}..</code></td><td class="ok">${v}</td></tr>`)});
 </script>
 </body></html>"""
 
@@ -62,12 +64,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             self._send(200, "ok")
         else:
-            data = {"blocks": [b.to_dict() for b in chain_inst.blocks],
-                    "txs": chain_inst.all_txs(),
+            with chain_inst.lock:
+                blocks = [b.to_dict() for b in chain_inst.blocks]
+            data = {"blocks": [dict(b, txs=[_slim(t) for t in b["txs"]]) for b in blocks],
+                    "txs": [_slim(t) for t in chain_inst.all_txs()],
                     "balances": chain_inst.balances(),
                     "prices": PRICES_MAP,
                     "names": {w.address: w.name for w in _named_wallets()}}
-            self._send(200, PAGE.replace("DATA", json.dumps(data)))
+            # "<" escaped so no value (a memo) can close the <script> it sits in
+            self._send(200, PAGE.replace("DATA", json.dumps(data).replace("<", "\\u003c")))
 
     def _send(self, code, body):
         body = body.encode()
@@ -76,6 +81,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+def _slim(tx: dict) -> dict:
+    """A tx without its 50 KB Lamport pub/sig, for display."""
+    return {k: v for k, v in tx.items() if k not in ("pub", "sig")}
 
 
 def _named_wallets():

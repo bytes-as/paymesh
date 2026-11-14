@@ -15,6 +15,7 @@ import os
 import random
 import sys
 import threading
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chain
@@ -24,6 +25,7 @@ import wallets
 HOST, PORT = "127.0.0.1", 8402
 CURRENCY = "PMX"
 PRICES = {"/open/info": 0, "/premium/price": 5, "/premium/history": 20}
+MAX_TX_BYTES = 200_000  # a signed tx is ~50 KB (Lamport pub + sig)
 
 # simulated feed: some seeded history so /premium/history returns real data
 price_history = [{"t": i, "price": round(100.0 + random.random() * 10, 4)} for i in range(12)]
@@ -70,8 +72,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.path.startswith("/faucet"):
             # free test faucet: mint 100 PMX to a named local wallet, mine at once
-            name = self.path.split("name=")[-1] or "buyer"
-            w = wallets.load_or_create(name)
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            name = (q.get("name") or ["buyer"])[0]
+            try:
+                w = wallets.load_or_create(name)
+            except ValueError as e:
+                self._send(400, {"error": str(e)})
+                return
             with chain_lock:
                 chain_inst.add_tx(chain_inst.new_tx(chain.FAUCET, w.address, 100, f"faucet:{name}"))
                 blk = chain_inst.mine()
@@ -105,11 +112,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # agents submit a signed tx; the server (sole miner) verifies and mines it
             try:
                 length = int(self.headers.get("Content-Length", 0))
+                if not 0 < length <= MAX_TX_BYTES:
+                    raise ValueError(f"body must be 1..{MAX_TX_BYTES} bytes")
                 tx = json.loads(self.rfile.read(length).decode())
                 with chain_lock:
-                    chain_inst.add_tx(tx)  # raises on unsigned/badly-signed
+                    chain_inst.add_tx(tx)  # raises on any broken ledger rule
                     blk = chain_inst.mine()
-            except (ValueError, json.JSONDecodeError) as e:
+            except (ValueError, UnicodeDecodeError) as e:  # JSONDecodeError is a ValueError
                 self._send(400, {"error": f"tx rejected: {e}"})
                 return
             self._send(200, {"accepted": True, "txid": tx["txid"], "block": blk.index})
@@ -138,9 +147,7 @@ def start(chain_: chain.Chain, port=PORT) -> http.server.ThreadingHTTPServer:
 
 
 if __name__ == "__main__":
-    c = chain.Chain()
-    if not c.blocks:
-        c.genesis()
+    c = chain.Chain.open_or_archive()
     httpd = start(c)
     try:
         while True:

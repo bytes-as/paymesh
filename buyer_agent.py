@@ -25,7 +25,8 @@ def get(path: str, headers: dict | None = None):
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
-        body = e.read().decode()
+        with e:
+            body = e.read().decode()
         try:
             body = json.loads(body)
         except json.JSONDecodeError:
@@ -56,8 +57,9 @@ def buy_once(chain_: chain.Chain, wallet: wallets.Wallet, name: str, call: int,
         log["result"] = f"insufficient funds ({bal} < {amount} PMX)"
         log["ok"] = False
         return log
-    tx = chain_.new_tx(wallet.address, challenge["recipient"], amount, memo)
-    wallets.sign_tx(tx, wallet)
+    live = chain.Chain(chain_.path)  # the running server's ledger: whose key signs next
+    tx = live.new_tx(wallet.address, challenge["recipient"], amount, memo)
+    wallets.sign_tx(tx, wallet, live)
     req = urllib.request.Request(f"{API}/tx", data=json.dumps(tx).encode(),
                                  headers={"Content-Type": "application/json"})
     try:
@@ -89,9 +91,7 @@ def ensure_funded(chain_: chain.Chain, wallet: wallets.Wallet, need: int) -> boo
 
 
 def main():
-    c = chain.Chain()
-    if not c.blocks:
-        c.genesis()
+    c = chain.Chain()  # read-only view of the running server's chain.json
     w = wallets.load_or_create("buyer")
     funded = ensure_funded(c, w, 20)
     if funded:
