@@ -7,7 +7,7 @@ from a separate venv (never installed into paymesh, not run by check.py):
     %TEMP%\\x402ref\\Scripts\\python.exe -m pip install "x402[requests]==2.27.0"
     %TEMP%\\x402ref\\Scripts\\python.exe interop\\x402_reference.py
 
-Last run: x402 2.27.0, REFERENCE INTEROP OK (2026-11-14, with fees and the facilitator client).
+Last run: x402 2.27.0, REFERENCE INTEROP OK (2026-11-15: fees, the facilitator client, an opening payload).
 The facilitator part needs httpx too: pip install "x402[requests,httpx]==2.27.0".
 """
 import json
@@ -123,8 +123,30 @@ def main():
         out["facilitator"] = {"verify": [v.is_valid, v.payer == pm.wallet.address],
                               "settle": [s1.success, s1.transaction == tx["txid"]],
                               "settle_again": [s2.success, s2.error_reason]}
+        # 5. an opening payload through the reference facilitator client: a hub channel opened
+        # inside the payment ({"open": signed channel_open, "tick", "word"}); payload is free JSON
+        import channels
+        hub = sup.kinds[0].extra["hub"]
+        creq = PaymentRequirements(scheme="paymesh", network=sup.kinds[0].network, amount="7", asset="PMX", pay_to=shop,
+                                   max_timeout_seconds=60, extra={"assetTransferMethod": "channel", "paymentFlow": "upfront",
+                                                                  "unit": 1})
+        bc = channels.BuyerChannel(30)
+        led = pm._ledger()
+        op = led.new_tx(pm.wallet.address, hub, 30, "channel:open")
+        op.update(kind="channel_open", anchor=bc.anchor, ticks=30, unit=1, expires=led.height + 500)
+        wallets.sign_tx(op, pm.wallet, led)
+        opening = PaymentPayload(x402_version=2, accepted=creq, payload={"open": op, "tick": 7, "word": bc.words[7]})
+        ov = fac.verify(opening, creq)
+        os1 = fac.settle(opening, creq)
+        os2 = fac.settle(opening, creq)
+        nxt = PaymentPayload(x402_version=2, accepted=creq, payload={"channel": op["txid"], "tick": 14, "word": bc.words[14]})
+        os3 = fac.settle(nxt, creq)
+        out["facilitator_opening"] = {"verify": ov.is_valid, "settle": [os1.success, os1.payer == pm.wallet.address],
+                                      "settle_again": [os2.success, os2.error_reason], "next_word": os3.success}
         print(json.dumps(out, indent=1))
-        ok = (out["facilitator"]["verify"] == [True, True] and out["facilitator"]["settle"] == [True, True]
+        ok = (out["facilitator_opening"] == {"verify": True, "settle": [True, True],
+                                             "settle_again": [False, "invalid_paymesh_channel_payment"], "next_word": True}
+              and out["facilitator"]["verify"] == [True, True] and out["facilitator"]["settle"] == [True, True]
               and out["facilitator"]["settle_again"][0] is False
               and out["paid_by_reference_client"]["status"] == 200 and out["paid_by_reference_client"]["success"]
               and out["balance_after"] == 94 and  # 100 - 5 - the 1 PMX fee
