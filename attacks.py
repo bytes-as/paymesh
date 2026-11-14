@@ -204,6 +204,43 @@ def run(node: str, restart=None) -> list:
             return 200, me._node(f"/channel/info?id={bc.id}")[1]
         attempt("the same refund race against a seller running apart from the node", refund_far,
                 lambda c, b: served_far > 0 and b.get("paid") == served_far * 3)
+
+        # --- the hub: one deposit, any seller ---
+        hb = Client(node, "hubber")
+        hb.faucet()
+        hb.open_hub(ticks=40, expires_in=chn.SellerBook.STOP_WITHIN + 8)
+        shop_url = f"http://127.0.0.1:{sport}/forecast"
+        paid_calls = [hb.get("/premium/price")[0], hb.get(shop_url)[0]].count(200)  # 5 + 3 PMX
+        word = hb.channel.pay(5)
+        paid_calls += hb._req("/premium/price", headers={"X-Channel": word})[0] == 200
+        attempt("spend one hub channel word at two sellers",
+                lambda: hb._req(shop_url, headers={"X-Channel": word}), lambda c, b: c == 402)
+        hub_exp = me._node(f"/channel/info?id={hb.channel.id}")[1]["expires"]
+        while height() < hub_exp:
+            me._node(f"/faucet?address={'ee' * 32}")
+
+        def hub_refund():
+            led = hb._ledger()
+            t = led.new_tx(hb.wallet.address, hb.wallet.address, 40, "channel:refund")
+            t.update(kind="channel_refund", channel=hb.channel.id)
+            wallets.sign_tx(t, hb.wallet, led)
+            post(t)
+            return 200, me._node(f"/channel/info?id={hb.channel.id}")[1]
+        attempt("spend a hub channel at two sellers, then race to refund it", hub_refund,
+                lambda c, b: paid_calls == 3 and b.get("paid") == 13
+                and sorted(b.get("splits", {}).values()) == [3, 10])
+
+        # a seller (me) inflating its close with splits beyond what the buyer revealed
+        bc2 = chn.BuyerChannel(20)
+        led = victim._ledger()
+        t = led.new_tx(victim.wallet.address, me.wallet.address, 20, "channel:open")
+        t.update(kind="channel_open", anchor=bc2.anchor, ticks=20, unit=1, expires=height() + 500)
+        wallets.sign_tx(t, victim.wallet, led)
+        post(t)
+        bc2.id = t["txid"]
+        attempt("a seller pays itself more than the buyer revealed, through splits",
+                lambda: post(signed(me, victim.wallet.address, 2, "channel:close", kind="channel_close",
+                                    channel=bc2.id, ticks=2, word=bc2.words[2], splits={me.wallet.address: 20})), no)
     finally:
         shop.stop.set()
         httpd.shutdown()
