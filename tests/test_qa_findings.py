@@ -104,6 +104,47 @@ class QAFindings(unittest.TestCase):
         cl._req("/tx", rtx)
         self.assertEqual(self.chain.ledger.channels[bc.id].get("paid", 0), served * 5)
 
+    # QA-PM-4 (guard, holds): x402 "tx" method checks the challenge read-only, submits, then
+    # spends it. Two PAYMENT-SIGNATUREs with the same challenge memo sent at once (a client
+    # retry): only one tx may be mined, and only for a served call.
+    def test_qa_pm_4_x402_same_challenge_twice_charges_once(self):
+        import threading
+        import paymesh_x402 as x402
+        cl = Client(f"http://127.0.0.1:{self.port}", "qa-x402-twice")
+        cl.faucet()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", "/premium/price")
+        r = conn.getresponse()
+        r.read()
+        req = x402.decode(r.getheader(x402.REQUIRED))
+        conn.close()
+        acc = next(a for a in req["accepts"] if a["extra"]["assetTransferMethod"] == "tx")
+        led = cl._ledger()
+        heads = []
+        for _ in range(2):
+            tx = led.new_tx(cl.wallet.address, acc["payTo"], int(acc["amount"]), acc["extra"]["memo"])
+            wallets.sign_tx(tx, cl.wallet, led)
+            led._key = tx["next_key"]  # the second tx is signed by the next one-time key
+            heads.append(x402.encode({"x402Version": 2, "accepted": acc, "payload": {"transaction": tx}}))
+        before = self.chain.balance(cl.wallet.address)
+        gate, codes = threading.Barrier(2), []
+
+        def pay(h):
+            gate.wait()
+            codes.append(self._get("/premium/price", {x402.SIGNATURE: h}))
+
+        ts = [threading.Thread(target=pay, args=(h,)) for h in heads]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        import time
+        time.sleep(1.5)  # let the miner put any pending tx into a block
+        spent = before - self.chain.balance(cl.wallet.address)
+        served = codes.count(200)
+        paid = [t for t in self.chain.all_txs() if t["from_wallet"] == cl.wallet.address]
+        cost = sum(t["amount"] + t.get("fee", 0) for t in paid)  # every signed tx also burns its fee
+        self.assertEqual(len(paid), served, f"codes {sorted(codes)}: {len(paid)} payments mined for {served} served calls")
+        self.assertEqual(spent, cost, f"buyer charged {spent} PMX, mined txs cost {cost}")
+
 
 class QARemoteSeller(unittest.TestCase):
     """A seller running apart from the node (paymesh_seller): the node cannot settle for it."""
