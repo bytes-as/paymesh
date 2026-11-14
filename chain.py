@@ -26,7 +26,7 @@ import time
 import wallets
 
 DIFFICULTY = 2  # hash must start with this many zeros; tuned so block time < 1s
-CHAIN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chain.json")
+CHAIN_FILE = os.path.join(wallets.HOME, "chain.json")
 FAUCET = "0" * 64  # only the faucet may send unsigned txs
 MAX_MEMO = 256
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -56,16 +56,90 @@ class Block:
                 "prev_hash": self.prev_hash, "nonce": self.nonce, "hash": self.hash()}
 
 
+MAX_TICKS = 1_000_000  # longest hash chain a channel may commit to
+
+
+def hash_word(w: str, times: int = 1) -> str:
+    """Apply sha256 to a 64-hex word `times` times (PayWord hash chain step)."""
+    b = bytes.fromhex(w)
+    for _ in range(times):
+        b = hashlib.sha256(b).digest()
+    return b.hex()
+
+
 class Ledger:
-    """Balances, each address's current one-time key, and every txid seen."""
+    """Balances, each address's current one-time key, every txid seen, and payment channels.
+
+    Payment channels (PayWord): the buyer locks n*unit PMX with a channel_open
+    tx that commits to anchor = sha256^n(secret). Each paid call reveals the
+    next word of the chain off-chain; the seller checks it with a few hashes.
+    The seller settles once with channel_close (ticks i and word w_i with
+    sha256^i(w_i) == anchor): i*unit to the seller, the rest back to the buyer.
+    If the seller never closes, the buyer takes the deposit back with
+    channel_refund once the channel's expiry height has passed.
+    """
 
     def __init__(self):
         self.balances: dict = {}
         self.keys: dict = {}
         self.txids: set = set()
+        self.channels: dict = {}  # open txid -> {buyer, seller, anchor, n, unit, expires, open}
+        self.height = 0  # blocks applied; pending txs are judged at this height
 
     def current_key(self, address: str) -> str:
         return self.keys.get(address, address)  # key 0's fingerprint is the address
+
+    def _signed_by(self, tx, who: str):
+        ok, why = wallets.verify_tx(tx, self.current_key(who))
+        if not ok:
+            raise ValueError(why)
+
+    def _check_channel(self, tx, kind):
+        frm, to, amt = tx["from_wallet"], tx["to_wallet"], tx["amount"]
+        if frm == FAUCET:
+            raise ValueError("the faucet cannot use channels")
+        if kind == "channel_open":
+            anchor, n, unit, exp = (tx.get(k) for k in ("anchor", "ticks", "unit", "expires"))
+            if not isinstance(anchor, str) or not HEX64.match(anchor):
+                raise ValueError("channel anchor must be 64 hex")
+            for name, v, lo, hi in (("ticks", n, 1, MAX_TICKS), ("unit", unit, 1, 10**9), ("expires", exp, self.height + 1, self.height + 100_000)):
+                if type(v) is not int or not lo <= v <= hi:
+                    raise ValueError(f"channel {name} must be a whole number in {lo}..{hi}")
+            if amt != n * unit:
+                raise ValueError("channel deposit (amount) must equal ticks * unit")
+            if frm == to:
+                raise ValueError("a channel pays someone else")
+            self._signed_by(tx, frm)
+            if self.balances.get(frm, 0) < amt:
+                raise ValueError(f"insufficient funds: {self.balances.get(frm, 0)} PMX, needs {amt}")
+            return
+        ch = self.channels.get(tx.get("channel"))
+        if ch is None:
+            raise ValueError("unknown channel")
+        if not ch["open"]:
+            raise ValueError("channel already settled")
+        if kind == "channel_close":
+            i, w = tx.get("ticks"), tx.get("word")
+            if frm != ch["seller"] or to != ch["buyer"]:
+                raise ValueError("channel_close goes from the seller to the buyer")
+            if type(i) is not int or not 1 <= i <= ch["n"] or not isinstance(w, str) or not HEX64.match(w):
+                raise ValueError("channel_close needs ticks in 1..n and a 64-hex word")
+            if hash_word(w, i) != ch["anchor"]:
+                raise ValueError("word does not hash to the channel anchor in that many ticks")
+            if amt != i * ch["unit"]:
+                raise ValueError("channel_close amount must equal ticks * unit")
+            self._signed_by(tx, frm)
+            return
+        if kind == "channel_refund":
+            if frm != ch["buyer"] or to != ch["buyer"]:
+                raise ValueError("only the buyer refunds a channel, to itself")
+            if self.height < ch["expires"]:
+                raise ValueError(f"channel refundable from block {ch['expires']}")
+            if amt != ch["n"] * ch["unit"]:
+                raise ValueError("refund amount must equal the deposit")
+            self._signed_by(tx, frm)
+            return
+        raise ValueError(f"unknown tx kind {kind!r}")
 
     def check(self, tx) -> None:
         """Raise ValueError if tx breaks a rule; change nothing."""
@@ -83,6 +157,9 @@ class Ledger:
             raise ValueError("txid already used (a tx counts once)")
         if to == FAUCET:
             raise ValueError("cannot pay the faucet address")
+        kind = tx.get("kind", "pay")
+        if kind != "pay":
+            return self._check_channel(tx, kind)
         if frm == FAUCET:
             if not memo.startswith("faucet:"):
                 raise ValueError("faucet txs carry a faucet: memo")
@@ -97,10 +174,27 @@ class Ledger:
     def apply(self, tx) -> None:
         self.check(tx)
         frm, to, amt = tx["from_wallet"], tx["to_wallet"], tx["amount"]
+        kind = tx.get("kind", "pay")
         if frm != FAUCET:
-            self.balances[frm] = self.balances.get(frm, 0) - amt
             self.keys[frm] = tx["next_key"]
-        self.balances[to] = self.balances.get(to, 0) + amt
+        if kind == "pay":
+            if frm != FAUCET:
+                self.balances[frm] = self.balances.get(frm, 0) - amt
+            self.balances[to] = self.balances.get(to, 0) + amt
+        elif kind == "channel_open":  # deposit leaves the buyer, held by the channel
+            self.balances[frm] = self.balances.get(frm, 0) - amt
+            self.channels[tx["txid"]] = {"buyer": frm, "seller": to, "anchor": tx["anchor"], "n": tx["ticks"],
+                                         "unit": tx["unit"], "expires": tx["expires"], "open": True}
+        elif kind == "channel_close":
+            ch = self.channels[tx["channel"]]
+            deposit = ch["n"] * ch["unit"]
+            self.balances[ch["seller"]] = self.balances.get(ch["seller"], 0) + amt
+            self.balances[ch["buyer"]] = self.balances.get(ch["buyer"], 0) + deposit - amt
+            ch.update(open=False, paid=amt)
+        elif kind == "channel_refund":
+            ch = self.channels[tx["channel"]]
+            self.balances[frm] = self.balances.get(frm, 0) + amt
+            ch.update(open=False, paid=0)
         self.txids.add(tx["txid"])
 
 
@@ -158,6 +252,7 @@ class Chain:
             g = Block(0, time.time(), [], "0" * 64)
             self._mine(g)
             self.blocks.append(g)
+            self.ledger.height = self.pledger.height = 1
             self.save()
             return g
 
@@ -188,8 +283,10 @@ class Chain:
             self._mine(b)
             self.pending = []
             self.blocks.append(b)
+            self.ledger.height = b.index
             for tx in b.txs:
                 self.ledger.apply(tx)
+            self.ledger.height = self.pledger.height = len(self.blocks)
             self.save()
             return b
 
@@ -211,11 +308,13 @@ class Chain:
                 return None, f"block {b.index}: broken link"
             if not b.hash().startswith("0" * DIFFICULTY):
                 return None, f"block {b.index}: bad PoW"
+            ledger.height = n
             for tx in b.txs:
                 try:
                     ledger.apply(tx)
                 except ValueError as e:
                     return None, f"block {b.index}: bad tx {str(tx.get('txid', '?'))[:8]} ({e})"
+            ledger.height = n + 1
             prev = b.hash()
         return ledger, "ok"
 

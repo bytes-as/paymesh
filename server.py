@@ -19,13 +19,16 @@ import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chain
+import channels
 import paywall
 import wallets
 
-HOST, PORT = "127.0.0.1", 8402
+HOST, PORT = "127.0.0.1", int(os.environ.get("PAYMESH_API_PORT", 8402))
 CURRENCY = "PMX"
 PRICES = {"/open/info": 0, "/premium/price": 5, "/premium/history": 20}
 MAX_TX_BYTES = 200_000  # a signed tx is ~50 KB (Lamport pub + sig)
+CHANNEL_UNIT = 1  # PMX per channel tick
+SETTLE_WITHIN = 20  # settle a paid channel when it expires within this many blocks
 
 # simulated feed: some seeded history so /premium/history returns real data
 price_history = [{"t": i, "price": round(100.0 + random.random() * 10, 4)} for i in range(12)]
@@ -33,6 +36,7 @@ price_history = [{"t": i, "price": round(100.0 + random.random() * 10, 4)} for i
 chain_lock = threading.Lock()
 chain_inst: chain.Chain
 SELLER: wallets.Wallet
+BOOK: channels.SellerBook
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -50,12 +54,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         if price == 0:
             return True  # free route: no 402, no payment
+        chan = self.headers.get("X-Channel")
+        if chan:  # paid from an open payment channel: no tx, a few hashes
+            ok, reason = BOOK.accept(chain_inst, chan, price)
+            if ok:
+                self.paid_reason = reason
+                return True
+            self._send(402, {"error": "channel payment refused", "reason": reason, "amount": price, "currency": CURRENCY})
+            return False
         with chain_lock:
             ok, reason = paywall.verify_payment(chain_inst, self.headers, path)
         if ok:
             self.paid_reason = reason
             return True
         ch = paywall.open_challenge(chain_inst, SELLER.address, price, path)
+        ch["channel"] = _terms()  # or: open a channel once and pay calls with X-Channel
         body = json.dumps(ch).encode()
         self.send_response(402)  # Payment Required
         self.send_header("Content-Type", "application/json")
@@ -85,6 +98,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, {"faucet": name, "address": w.address,
                              "minted": 100, "block": blk.index, "currency": CURRENCY})
             print(f"[api] faucet minted 100 PMX to '{name}' in block {blk.index}")
+            return
+        if self.path.startswith("/channel/terms"):
+            self._send(200, _terms())
             return
         if self.path.startswith("/open/info"):
             self._send(200, {"service": "paymesh demo API", "currency": CURRENCY,
@@ -124,6 +140,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, {"accepted": True, "txid": tx["txid"], "block": blk.index})
             print(f"[api] tx {tx['txid'][:16]}.. mined in block {blk.index}")
             return
+        if self.path.startswith("/channel/close"):
+            # settle a channel at the best word the seller holds (anyone may ask: it
+            # can only pay the seller what the buyer revealed, the rest goes back)
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if not 0 < length <= 4096:
+                    raise ValueError("body must be 1..4096 bytes")
+                cid = str(json.loads(self.rfile.read(length).decode()).get("channel", ""))
+                blk, tx = settle(cid)
+            except (ValueError, UnicodeDecodeError, AttributeError) as e:
+                self._send(400, {"error": f"close refused: {e}"})
+                return
+            self._send(200, {"settled": True, "channel": cid, "paid_to_seller": tx["amount"], "block": blk.index})
+            return
         self._send(404, {"error": "not found"})
 
     def _send(self, code: int, obj: dict):
@@ -135,12 +165,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _terms() -> dict:
+    return {"seller": SELLER.address, "unit": CHANNEL_UNIT, "currency": CURRENCY,
+            "max_ticks": chain.MAX_TICKS, "open": "POST /tx a signed channel_open (see channels.py)",
+            "pay": "X-Channel: <channel id> <tick> <word>", "close": "POST /channel/close {channel}"}
+
+
+def settle(cid: str):
+    with chain_lock:
+        tx = BOOK.close_tx(chain_inst, SELLER, cid)
+        chain_inst.add_tx(tx)
+        blk = chain_inst.mine()
+    print(f"[api] channel {cid[:12]} settled: {tx['amount']} PMX to seller in block {blk.index}")
+    return blk, tx
+
+
+def _settler(stop: threading.Event):
+    """Settle paid channels before they expire, so the buyer can't refund what it spent."""
+    while not stop.wait(2.0):
+        for cid in BOOK.expiring(chain_inst, SETTLE_WITHIN):
+            try:
+                settle(cid)
+            except ValueError as e:
+                print(f"[api] settle {cid[:12]} failed: {e}")
+
+
 def start(chain_: chain.Chain, port=PORT) -> http.server.ThreadingHTTPServer:
-    global chain_inst, SELLER
+    global chain_inst, SELLER, BOOK
     chain_inst = chain_
     SELLER = wallets.load_or_create("seller")
+    BOOK = channels.SellerBook(os.path.join(os.path.dirname(os.path.abspath(chain_.path)), "seller_channels.json"), SELLER.address)
     httpd = http.server.ThreadingHTTPServer((HOST, port), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    httpd.settler_stop = threading.Event()
+    threading.Thread(target=_settler, args=(httpd.settler_stop,), daemon=True).start()
     routes = "  ".join(f"{p}={v} PMX" for p, v in PRICES.items())
     print(f"[api] paymesh API on http://{HOST}:{port}  (prices: {routes})")
     return httpd
