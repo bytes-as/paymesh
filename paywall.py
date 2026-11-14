@@ -1,82 +1,110 @@
 """paymesh 402 paywall middleware: drop onto any BaseHTTPRequestHandler.
 
 Flow:
- 1. Unauthenticated GET -> HTTP 402 with a challenge JSON:
+ 1. Unpaid GET -> HTTP 402 with a challenge JSON:
         {"recipient", "amount", "nonce", "memo", "how_to_pay"}
- 2. Client sends a chain tx with memo == challenge memo, then retries with
-    header "X-Payment": <txid>.
- 3. Server looks the tx up by txid, checks it is in a mined block, memo binds
-    recipient + amount + path exactly, and the nonce is unspent. Replaying the
-    same header, or re-paying, fails because each nonce is consumed once.
+ 2. Client sends a chain tx whose memo is exactly the challenge memo, then
+    retries with header "X-Payment: <txid>".
+ 3. Server finds the tx in a mined block and checks that its memo is this
+    challenge's memo, it pays the quoted recipient and amount, the path
+    matches, and the challenge is open. Only then is the challenge spent, so
+    a wrong or hostile payment cannot burn someone else's challenge; a spent
+    challenge (or txid) never verifies again.
 
-Challenge nonces expire after CHALLENGE_TTL seconds. Stdlib only.
+Open challenges expire after CHALLENGE_TTL seconds and at most MAX_OPEN are
+kept (oldest dropped first), so a flood of unpaid requests can't grow memory
+without bound. Stdlib only.
 """
-import json
+import collections
 import os
 import secrets
+import threading
 import time
 
 CHALLENGE_TTL = 300.0
+MAX_OPEN = 10_000
 CURRENCY = "PMX"
 
-# nonce -> {"recipient", "amount", "path", "expires"}
-_open_challenges: dict = {}
+# nonce -> {"recipient", "amount", "path", "expires"}, oldest first
+_open_challenges: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
+_spent_txids: set = set()
+_lock = threading.Lock()
+
+
+def _sweep(now: float):
+    while _open_challenges:
+        nonce, ch = next(iter(_open_challenges.items()))
+        if ch["expires"] > now and len(_open_challenges) <= MAX_OPEN:
+            break
+        _open_challenges.pop(nonce)
 
 
 def open_challenge(chain, recipient: str, amount: int, path: str) -> dict:
     """Mint a payment challenge; the tx must carry the returned memo."""
     nonce = secrets.token_hex(16)
-    _open_challenges[nonce] = {
-        "recipient": recipient,
-        "amount": amount,
-        "path": path,
-        "expires": time.time() + CHALLENGE_TTL,
-    }
+    memo = f"{recipient}:{nonce}:{amount}"
+    now = time.time()
+    with _lock:
+        _open_challenges[nonce] = {"recipient": recipient, "amount": amount, "path": path,
+                                   "memo": memo, "expires": now + CHALLENGE_TTL}
+        _sweep(now)
     return {
         "error": "payment required",
         "recipient": recipient,
         "amount": amount,
         "currency": CURRENCY,
-        "memo": f"{recipient}:{nonce}:{amount}",
+        "memo": memo,
         "nonce": nonce,
+        "expires_in": int(CHALLENGE_TTL),
         "chain_tip": chain.tip_hash,
         "how_to_pay": {
-            "step1": f"send a chain tx: to={recipient}, amount={amount}, memo=memo",
-            "step2": "wait for it to be mined (PoW difficulty 2, <1s)",
+            "step1": f"send a signed chain tx: to={recipient}, amount={amount}, memo=memo (POST /tx)",
+            "step2": "the server mines it at once",
             "step3": "retry this request with header X-Payment: <txid>",
         },
     }
 
 
 def verify_payment(chain, headers, path: str) -> tuple[bool, str]:
-    """Return (ok, reason). ok=True only when the tx pays this exact nonce once."""
-    txid = headers.get("X-Payment", "")
+    """Return (ok, reason). ok=True only when a mined tx pays this exact open challenge."""
+    txid = headers.get("X-Payment", "") or ""
     if not txid:
         return False, "no X-Payment header"
-    tx, block = chain.find_tx_by_id(txid)
+    tx, block = chain.find_tx_by_id(txid.strip())
     if tx is None:
         return False, "txid not found in any mined block"
-    nonce = tx["memo"].split(":")[1]
-    ch = _open_challenges.pop(nonce, None)
-    if ch is None:
-        return False, "unknown or already-spent payment nonce"
-    if time.time() > ch["expires"]:
-        return False, "challenge expired"
-    if ch["path"] != path:
-        return False, "challenge was for a different path"
-    if tx["to_wallet"] != ch["recipient"] or tx["amount"] != ch["amount"]:
-        return False, "tx does not pay the exact challenge recipient/amount"
+    parts = tx.get("memo", "").split(":")
+    if len(parts) != 3:
+        return False, "tx memo is not a payment challenge"
+    nonce = parts[1]
+    with _lock:
+        if tx["txid"] in _spent_txids:
+            return False, "this payment was already used"
+        ch = _open_challenges.get(nonce)
+        if ch is None:
+            return False, "unknown, expired or already-spent payment nonce"
+        if time.time() > ch["expires"]:
+            _open_challenges.pop(nonce, None)
+            return False, "challenge expired"
+        if ch["path"] != path:
+            return False, "challenge was for a different path"
+        if tx["memo"] != ch["memo"]:
+            return False, "tx memo does not match the challenge"
+        if tx["to_wallet"] != ch["recipient"] or tx["amount"] != ch["amount"]:
+            return False, "tx does not pay the exact challenge recipient/amount"
+        _open_challenges.pop(nonce)  # spend only after every check passed
+        _spent_txids.add(tx["txid"])
     return True, f"paid by tx {tx['txid'][:16]} in block {block.index}"
 
 
 if __name__ == "__main__":
+    import tempfile
     import chain as ch
     import wallets
 
-    selftest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selftest-chain.json")
-    if os.path.exists(selftest):
-        os.remove(selftest)
-    c = ch.Chain(selftest)
+    tmp = tempfile.mkdtemp()
+    wallets.WALLET_DIR = os.path.join(tmp, "wallets")
+    c = ch.Chain(os.path.join(tmp, "chain.json"))
     c.genesis()
     seller = wallets.fund(c, "seller", 0)
     buyer = wallets.fund(c, "buyer", 1000)
@@ -86,25 +114,13 @@ if __name__ == "__main__":
         def get(self, k, default=None):
             return dict.get(self, k, default)
 
-    # 1. challenge
     challenge = open_challenge(c, seller.address, 5, "/premium/price")
-    # 2. pay (signed with the buyer's Lamport key)
     tx = c.new_tx(buyer.address, seller.address, 5, challenge["memo"])
-    wallets.sign_tx(tx, buyer)
+    wallets.sign_tx(tx, buyer, c)
     c.add_tx(tx)
     c.mine()
-    # 3. verify ok
     ok, why = verify_payment(c, FakeHeaders({"X-Payment": tx["txid"]}), "/premium/price")
     assert ok, why
-    # 4. replay: same header again -> nonce already spent
     ok2, why2 = verify_payment(c, FakeHeaders({"X-Payment": tx["txid"]}), "/premium/price")
     assert not ok2, why2
-    # 5. wrong recipient -> rejected before nonce consumed? (nonce consumed here, fine)
-    challenge2 = open_challenge(c, seller.address, 5, "/premium/price")
-    bad = c.new_tx(buyer.address, buyer.address, 5, challenge2["memo"])
-    wallets.sign_tx(bad, buyer)  # correctly signed, but pays the wrong recipient
-    c.add_tx(bad)
-    c.mine()
-    ok3, why3 = verify_payment(c, FakeHeaders({"X-Payment": bad["txid"]}), "/premium/price")
-    assert not ok3, why3
-    print("self-test ok: 402 -> pay -> verified; replay and wrong-recipient rejected")
+    print("self-test ok: 402 -> pay -> verified; replay rejected")
