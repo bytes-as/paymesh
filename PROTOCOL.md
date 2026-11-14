@@ -49,7 +49,11 @@ channel tick>, "network", "payer", "amount"}`; `400` for a malformed header
 `PAYMENT-REQUIRED`. paymesh-specific reasons: `invalid_paymesh_payload_recipient_mismatch`,
 `invalid_paymesh_payload_value_mismatch`, `invalid_paymesh_challenge`,
 `invalid_paymesh_channel_payment`, `invalid_paymesh_payment`; `invalid_transaction_state`
-when the ledger refuses the tx.
+when the ledger refuses the tx. A tx the node accepted but did not mine in time
+(`PAYMESH_MINE_WAIT_S`, 15 s) answers `402` with `errorReason` `settlement_pending` and
+the txid in `transaction`, as the spec requires: it may still be mined, so the
+challenge stays reserved for that tx. Another tx for it is refused, and the same tx
+sent again is served once it is mined.
 
 A client that sent a signed tx and was refused retires that one-time key (a 1 PMX
 payment to itself, sent to the node) before signing anything else, so a seller that

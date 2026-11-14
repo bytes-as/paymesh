@@ -37,6 +37,13 @@ METHODS = ("tx", "channel")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
+class Pending(ValueError):
+    """A submitted tx was accepted but not mined in time: it may still be mined. Never a refusal."""
+
+
+PENDING_MSG = "not mined in time; it stays pending"
+
+
 class Invalid(ValueError):
     """A payment header that can't be used. `status` 400 = malformed, 402 = refused."""
 
@@ -176,9 +183,16 @@ def settle(value: str, *, network: str, pay_to: str, price: int, path: str, chai
             return 402, settlement(network, False, reason="invalid_paymesh_challenge", message=why), method
         try:
             submit(tx)
+        except Pending as e:  # it may still be mined: keep the reservation, so no other tx can pay this challenge
+            return 402, settlement(network, False, tx["txid"], reason="settlement_pending", message=str(e)), method
         except ValueError as e:
-            paywall.release(tx["memo"], tx["txid"])
-            return 402, settlement(network, False, reason="invalid_transaction_state", message=str(e)), method
+            if "txid already used" in str(e):  # a retry of a tx the ledger already has
+                if chain_.find_tx_by_id(tx["txid"])[0] is None:  # still pending
+                    return 402, settlement(network, False, tx["txid"], reason="settlement_pending",
+                                           message=PENDING_MSG), method
+            else:  # a definite refusal: the tx can never be mined, the challenge is free again
+                paywall.release(tx["memo"], tx["txid"])
+                return 402, settlement(network, False, reason="invalid_transaction_state", message=str(e)), method
         txid = tx["txid"]
     else:
         txid = payload["txid"]

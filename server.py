@@ -30,6 +30,7 @@ PRICES = {"/open/info": 0, "/premium/price": 5, "/premium/history": 20}
 MAX_TX_BYTES = 200_000  # a signed tx is ~50 KB (Lamport pub + sig)
 CHANNEL_UNIT = 1  # PMX per channel tick
 SETTLE_WITHIN = 20  # settle a paid channel when it expires within this many blocks
+MINE_WAIT_S = float(os.environ.get("PAYMESH_MINE_WAIT_S", 15))  # how long POST /tx waits for its block
 REFUND_HOLD_S = float(os.environ.get("PAYMESH_REFUND_HOLD_S", 6.0))  # > 2 polls of a separate seller's settler
 
 # simulated feed: some seeded history so /premium/history returns real data
@@ -419,8 +420,8 @@ def submit_and_wait(tx) -> "chain.Block":
     # the miner thread puts every waiting tx into its next block
     with mined:
         mined.notify_all()
-        if not mined.wait_for(lambda: tx["txid"] in chain_inst.where, timeout=15):
-            raise ValueError("not mined in time; it stays pending")
+        if not mined.wait_for(lambda: tx["txid"] in chain_inst.where, timeout=MINE_WAIT_S):
+            raise x402.Pending(x402.PENDING_MSG)
     return chain_inst.blocks[chain_inst.where[tx["txid"]]]
 
 

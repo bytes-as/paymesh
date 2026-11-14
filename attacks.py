@@ -325,6 +325,30 @@ def run(node: str, restart=None) -> list:
         attempt("replay a channel word after the node was killed and restarted",
                 lambda: me._req("/premium/price", headers={"X-Channel": h}),
                 lambda c, b: first == 200 and c == 402 and "not after the last paid tick" in str(b))
+    if restart:  # QA-PM-4 follow-up: force "not mined in time" (the node waits 0 s for the block)
+        restart(PAYMESH_MINE_WAIT_S="0")
+        o = fresh()
+        led = me._ledger()
+        pair = []
+        for _ in range(2):
+            t = led.new_tx(me.wallet.address, seller, 5, o["tx"]["extra"]["memo"])
+            wallets.sign_tx(t, me.wallet, led)
+            led._key = t["next_key"]
+            pair.append(t)
+
+        def timeout_then_other_tx():
+            first = x402_pay(o["tx"], {"transaction": pair[0]})[0]  # usually 402 settlement_pending
+            pending = (me.last_receipt() or {}).get("errorReason")
+            other = x402_pay(o["tx"], {"transaction": pair[1]})[0]
+            for _ in range(50):
+                if me._node(f"/tx?id={pair[0]['txid']}")[0] == 200:
+                    break
+                time.sleep(0.1)
+            retry = x402_pay(o["tx"], {"transaction": pair[0]})[0] if first != 200 else 200
+            mined = [me._node(f"/tx?id={t['txid']}")[0] for t in pair]
+            return other, {"first": first, "first_reason": pending, "retry": retry, "mined": mined}
+        attempt("x402: a mining timeout, then a second tx for the same challenge", timeout_then_other_tx,
+                lambda c, b: b["first_reason"] == "settlement_pending" and c == 402 and b["mined"] == [200, 404] and b["retry"] == 200)
     attempt("node still healthy afterwards", lambda: me._node("/health"), lambda c, b: c == 200)
     return results
 
@@ -361,8 +385,8 @@ def main():
         env = dict(os.environ, PAYMESH_HOME=home, PAYMESH_API_PORT=str(port), PAYMESH_EXPLORER_PORT=str(_free_port()))
         node = f"http://127.0.0.1:{port}"
 
-        def start():
-            procs.append(subprocess.Popen([sys.executable, os.path.join(HERE, "paymesh.py"), "serve"], env=env,
+        def start(**extra_env):
+            procs.append(subprocess.Popen([sys.executable, os.path.join(HERE, "paymesh.py"), "serve"], env=dict(env, **extra_env),
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             for _ in range(100):
                 try:
@@ -371,10 +395,10 @@ def main():
                 except OSError:
                     time.sleep(0.1)
 
-        def restart():
+        def restart(**extra_env):
             procs[-1].kill()  # TerminateProcess: no shutdown code runs
             procs[-1].wait()
-            start()
+            start(**extra_env)
         start()
     try:
         res = run(node, restart)

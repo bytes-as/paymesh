@@ -236,6 +236,47 @@ class Node(unittest.TestCase):
         self.assertEqual(len(mined), codes.count(200))
         self.assertEqual(c.balance(), 100 - (5 + 1) * len(mined))
 
+    def test_a_mining_timeout_keeps_the_challenge_reserved(self):
+        """QA-PM-4 follow-up: the node answers "not mined in time" but the tx is queued and is
+        mined later. Another tx for the same challenge must stay refused; the same tx, retried,
+        is served once. The buyer pays once."""
+        c = Client(self.url, "x402-timeout")
+        c.faucet()
+        _, offers = self.challenge()
+        led = c._ledger()
+        txs = []
+        for _ in range(2):
+            t = led.new_tx(c.wallet.address, offers["tx"]["payTo"], 5, offers["tx"]["extra"]["memo"])
+            wallets.sign_tx(t, c.wallet, led)
+            led._key = t["next_key"]
+            txs.append(t)
+        real = server.submit_and_wait
+
+        def timed_out(tx):  # accepted and queued, then the wait runs out
+            with server.chain_lock:
+                server.chain_inst.add_tx(tx)
+            with server.mined:
+                server.mined.notify_all()
+            raise x402.Pending(x402.PENDING_MSG)
+        server.submit_and_wait = timed_out
+        try:
+            code, hdrs, _ = self.raw("/premium/price", {x402.SIGNATURE: sig(offers["tx"], {"transaction": txs[0]})})
+        finally:
+            server.submit_and_wait = real
+        receipt = x402.decode(hdrs[x402.RESPONSE])
+        self.assertEqual((code, receipt["errorReason"], receipt["transaction"]), (402, "settlement_pending", txs[0]["txid"]))
+        code, hdrs, _ = self.raw("/premium/price", {x402.SIGNATURE: sig(offers["tx"], {"transaction": txs[1]})})
+        self.assertEqual(code, 402)
+        self.assertIn("another tx is already paying", x402.decode(hdrs[x402.RESPONSE])["errorMessage"])
+        for _ in range(50):  # the queued tx gets mined
+            if self.chain.find_tx_by_id(txs[0]["txid"])[0]:
+                break
+            time.sleep(0.05)
+        code, _, _ = self.raw("/premium/price", {x402.SIGNATURE: sig(offers["tx"], {"transaction": txs[0]})})
+        self.assertEqual(code, 200)  # the retry is served
+        self.assertIsNone(self.chain.find_tx_by_id(txs[1]["txid"])[0])
+        self.assertEqual(c.balance(), 100 - 5 - 1)
+
     def test_malformed_payment_signature_is_400(self):
         code, hdrs, body = self.raw("/premium/price", {x402.SIGNATURE: "not base64!"})
         self.assertEqual(code, 400)

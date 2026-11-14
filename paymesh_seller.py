@@ -120,7 +120,10 @@ class _Node:
         """x402 settlement: put the buyer's signed tx on chain through the node."""
         code, res = self.post("/tx", tx)
         if code != 200:
-            raise ValueError(str((res or {}).get("error", res)) if isinstance(res, dict) else str(res))
+            msg = str((res or {}).get("error", res)) if isinstance(res, dict) else str(res)
+            if x402.PENDING_MSG in msg:  # accepted by the node, not yet mined: not a refusal
+                raise x402.Pending(msg)
+            raise ValueError(msg)
         return res
 
     # chain-like API used by paywall.verify_payment
