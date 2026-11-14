@@ -109,13 +109,27 @@ spent; a txid pays once. Challenges live 300 s; at most 10,000 are open.
    settle on-chain with its best `(i, w_i)`: `i * unit` PMX to the seller, the
    rest back to the buyer. The server also settles paid channels by itself 20
    blocks before they expire. An unsettled channel can be refunded in full by
-   the buyer from its `expires` height on.
+   the buyer from its `expires` height on, in two steps (7).
 6. Near expiry: a seller refuses ticks once the channel is within 20 blocks of
    `expires` (`402`, "too close to settle"). Blocks are cheap, so a buyer could
    still mine past the settler; therefore, when a `channel_refund` reaches the
    node, the node first settles the channel if it is the seller and was paid
    on it, and otherwise holds the refund up to 6 s (`PAYMESH_REFUND_HOLD_S`) so
    a seller running apart can settle first. Whichever is mined first counts.
+7. Refund window (blocks stamped from 2026-11-14 22:59 IST on). Blocks are cheap
+   but time is not, so the guarantee doesn't rest on any settler being up:
+   * the buyer's first `channel_refund` (from `expires` on) pays nothing. It
+     opens a window of `REFUND_WINDOW_S` = 600 s by block timestamps
+     (`refund_at` in `/channel/info`); its fee comes from the buyer's balance;
+   * during the window the channel stays open: the seller can still
+     `channel_close` with its best word, and that close cancels the refund;
+   * after the window the buyer sends the same `channel_refund` again (the
+     claim): the deposit comes back, minus that tx's fee. A claim before
+     `refund_at` is refused ("refund window open").
+   A seller that settles within 10 minutes of a refund request is paid even if
+   its settler was down when the buyer raced to the expiry. A close and a
+   claim can't both be mined: the first one counts. Refunds stamped before the
+   window rule replay as one step.
 
 ### 1c. Hub channel (one deposit, any seller)
 
@@ -191,7 +205,7 @@ when `chain.json` is loaded:
 * `pay`: signed by the sender's current key; the sender holds the amount (pending txs counted);
 * `channel_open`: `amount == ticks * unit`, `1 <= ticks <= 1,000,000`, `expires` in the future, funds held;
 * `channel_close`: from the channel's seller to its buyer, `amount == ticks * unit`, `sha256^ticks(word) == anchor`, signed by the seller; optional `splits` `{address: PMX}` (1..64 payees, whole PMX above 0, adding up to `amount`) pays those addresses instead of the seller (a hub paying its sellers); the signature covers it;
-* `channel_refund`: from the buyer to itself for the whole deposit, from the `expires` height on;
+* `channel_refund`: from the buyer to itself for the whole deposit, from the `expires` height on; the first opens the refund window (1b.7), the second, after `refund_at`, pays the deposit back;
 * the faucet (address `0` x 64) mints at most 100 PMX per tx, only through `GET /faucet`.
 * a tx carries only its kind's fields (above); anything else is refused.
 * `fee` (signed, every kind but the faucet): see section 6.
@@ -209,7 +223,7 @@ replay without fees, so the existing chain stays valid as it is.
 |---|---|---|
 | `pay`, `channel_open` | the sender | its balance: it must hold `amount + fee` |
 | `channel_close` | the seller | its share: it gets `amount - fee` (with `splits`, the splits add up to `amount - fee`; a hub takes the fee from the largest shares) |
-| `channel_refund` | the buyer | the deposit: it gets `deposit - fee` |
+| `channel_refund` | the buyer | request: its balance; claim: the deposit (it gets `deposit - fee`) |
 
 What it costs: a WOTS tx (~5 KB) burns 1 PMX; a Lamport tx (~52 KB) 7; a
 hub close with 64 payees 2. A paid call on-chain costs its price + 1 PMX and

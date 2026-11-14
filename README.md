@@ -76,9 +76,9 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (84 tests: attacks, channels, HTTP end
+`py -3 -m unittest discover -s tests` (92 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
-`py -3 attacks.py` runs 35 attacks against a scratch node and shows each refused.
+`py -3 attacks.py` runs 38 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
@@ -108,8 +108,10 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
   revealed; signed channel terms can't be altered; an unsettled channel
   refunds to the buyer after expiry, and the server settles paid channels
   before that. No ticks are taken within 20 blocks of expiry, and a buyer who
-  spends a channel then races to refund it loses: the node settles first for
-  its own channels and holds the refund 6 s for a seller running apart.
+  spends a channel then races to refund it loses: a refund opens a 10-minute
+  window (by block time, not blocks, which are cheap) in which the seller can
+  still close with its best word, so it is paid even if its settler was down
+  during the race; the node also settles its own channels first.
 * **The chain file is checked on load.** Every block is replayed through the
   same rules, so an edited history is refused.
 * **A crash loses nothing that was answered.** A block is on disk (fsync)
