@@ -1,11 +1,26 @@
 """paymesh mini blockchain: sha256-linked blocks, small PoW, chain.json persistence.
 
-Stdlib only. Run directly to mine a few blocks as a self-test:
+Every tx goes through one rule set, `Ledger.apply`, whether it arrives over
+the API, sits in a block being mined, or is read back from chain.json:
+
+* shape: 64-hex addresses and txid, a whole positive amount, a short memo;
+* a txid is used once (a signed tx cannot be resubmitted to charge twice);
+* the faucet (zero address) mints with an unsigned "faucet:" tx;
+* any other sender must sign with its CURRENT one-time key (wallets.py) and
+  hold the amount, counting txs already pending.
+
+Loading chain.json replays every block through the same rules, so a file
+edited by hand (a changed amount, a broken link) is refused.
+
+Stdlib only. Run directly for a self-test:
     py -3 chain.py
 """
+import copy
 import hashlib
 import json
 import os
+import re
+import threading
 import time
 
 import wallets
@@ -13,6 +28,9 @@ import wallets
 DIFFICULTY = 2  # hash must start with this many zeros; tuned so block time < 1s
 CHAIN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chain.json")
 FAUCET = "0" * 64  # only the faucet may send unsigned txs
+MAX_MEMO = 256
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+FORMAT = 2  # chain.json format: {"format": 2, "blocks": [...]}
 
 
 def sha256_hex(s: str) -> str:
@@ -38,11 +56,62 @@ class Block:
                 "prev_hash": self.prev_hash, "nonce": self.nonce, "hash": self.hash()}
 
 
+class Ledger:
+    """Balances, each address's current one-time key, and every txid seen."""
+
+    def __init__(self):
+        self.balances: dict = {}
+        self.keys: dict = {}
+        self.txids: set = set()
+
+    def current_key(self, address: str) -> str:
+        return self.keys.get(address, address)  # key 0's fingerprint is the address
+
+    def check(self, tx) -> None:
+        """Raise ValueError if tx breaks a rule; change nothing."""
+        if not isinstance(tx, dict):
+            raise ValueError("tx must be an object")
+        frm, to, amt, memo, txid = (tx.get(k) for k in ("from_wallet", "to_wallet", "amount", "memo", "txid"))
+        for name, v in (("from_wallet", frm), ("to_wallet", to), ("txid", txid)):
+            if not isinstance(v, str) or not HEX64.match(v):
+                raise ValueError(f"{name} must be 64 lowercase hex characters")
+        if type(amt) is not int or amt <= 0:
+            raise ValueError("amount must be a whole number of PMX above 0")
+        if not isinstance(memo, str) or len(memo) > MAX_MEMO:
+            raise ValueError(f"memo must be text of at most {MAX_MEMO} characters")
+        if txid in self.txids:
+            raise ValueError("txid already used (a tx counts once)")
+        if to == FAUCET:
+            raise ValueError("cannot pay the faucet address")
+        if frm == FAUCET:
+            if not memo.startswith("faucet:"):
+                raise ValueError("faucet txs carry a faucet: memo")
+            return
+        ok, why = wallets.verify_tx(tx, self.current_key(frm))
+        if not ok:
+            raise ValueError(why)
+        have = self.balances.get(frm, 0)
+        if have < amt:
+            raise ValueError(f"insufficient funds: {have} PMX, needs {amt}")
+
+    def apply(self, tx) -> None:
+        self.check(tx)
+        frm, to, amt = tx["from_wallet"], tx["to_wallet"], tx["amount"]
+        if frm != FAUCET:
+            self.balances[frm] = self.balances.get(frm, 0) - amt
+            self.keys[frm] = tx["next_key"]
+        self.balances[to] = self.balances.get(to, 0) + amt
+        self.txids.add(tx["txid"])
+
+
 class Chain:
     def __init__(self, path=CHAIN_FILE):
         self.path = path
         self.blocks = []
         self.pending = []
+        self.ledger = Ledger()  # mined blocks only
+        self.pledger = Ledger()  # mined blocks + pending txs
+        self.lock = threading.RLock()
         if os.path.exists(self.path):
             self.load()
 
@@ -50,19 +119,47 @@ class Chain:
     def load(self):
         with open(self.path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        self.blocks = [Block(b["index"], b["timestamp"], b["txs"], b["prev_hash"], b["nonce"]) for b in raw]
+        if isinstance(raw, list):
+            raise ValueError(f"{self.path}: format 1 chain (before key rotation); archive it and start a new chain")
+        if raw.get("format") != FORMAT:
+            raise ValueError(f"{self.path}: unknown chain format {raw.get('format')}")
+        blocks = [Block(b["index"], b["timestamp"], b["txs"], b["prev_hash"], b["nonce"]) for b in raw["blocks"]]
+        ledger, why = self._replay(blocks)
+        if ledger is None:
+            raise ValueError(f"{self.path}: invalid chain: {why}")
+        self.blocks, self.ledger, self.pledger, self.pending = blocks, ledger, copy.deepcopy(ledger), []
 
     def save(self):
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump([b.to_dict() for b in self.blocks], f, indent=1)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"format": FORMAT, "blocks": [b.to_dict() for b in self.blocks]}, f)
+        os.replace(tmp, self.path)
+
+    @classmethod
+    def open_or_archive(cls, path=CHAIN_FILE):
+        """Open the chain; an old-format chain is renamed aside (never deleted) and a new one started."""
+        try:
+            c = cls(path)
+        except ValueError as e:
+            if "format 1" not in str(e):
+                raise
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            aside = f"{os.path.splitext(path)[0]}.v1-{stamp}.json"
+            os.replace(path, aside)
+            print(f"[chain] {e}\n[chain] old chain kept as {aside}; starting a new chain")
+            c = cls(path)
+        if not c.blocks:
+            c.genesis()
+        return c
 
     # --- chain ops ---
     def genesis(self):
-        g = Block(0, time.time(), [], "0" * 64)
-        self._mine(g)
-        self.blocks.append(g)
-        self.save()
-        return g
+        with self.lock:
+            g = Block(0, time.time(), [], "0" * 64)
+            self._mine(g)
+            self.blocks.append(g)
+            self.save()
+            return g
 
     @property
     def tip_hash(self) -> str:
@@ -72,22 +169,29 @@ class Chain:
 
     def new_tx(self, from_wallet: str, to_wallet: str, amount: int, memo: str) -> dict:
         return {"from_wallet": from_wallet, "to_wallet": to_wallet,
-                "amount": int(amount), "memo": memo,
-                "txid": sha256_hex(f"{from_wallet}{to_wallet}{int(amount)}{memo}{time.time_ns()}{len(self.pending)}")}
+                "amount": amount, "memo": memo,
+                "txid": sha256_hex(f"{from_wallet}{to_wallet}{amount}{memo}{time.time_ns()}{os.urandom(8).hex()}")}
+
+    def current_key(self, address: str) -> str:
+        """The key fingerprint that must sign this address's next tx (pending txs included)."""
+        with self.lock:
+            return self.pledger.current_key(address)
 
     def add_tx(self, tx: dict):
-        ok, why = wallets.verify_tx(tx)
-        if not ok and not (tx["from_wallet"] == FAUCET and tx["memo"].startswith("faucet")):
-            raise ValueError(f"tx rejected: {why}")
-        self.pending.append(tx)
+        with self.lock:
+            self.pledger.apply(tx)  # raises ValueError on any broken rule
+            self.pending.append(tx)
 
     def mine(self) -> Block:
-        b = Block(len(self.blocks), time.time(), self.pending, self.tip_hash)
-        self.pending = []
-        self._mine(b)
-        self.blocks.append(b)
-        self.save()
-        return b
+        with self.lock:
+            b = Block(len(self.blocks), time.time(), self.pending, self.tip_hash)
+            self._mine(b)
+            self.pending = []
+            self.blocks.append(b)
+            for tx in b.txs:
+                self.ledger.apply(tx)
+            self.save()
+            return b
 
     @staticmethod
     def _mine(b: Block):
@@ -96,61 +200,71 @@ class Chain:
             b.nonce += 1
 
     # --- validation / ledger ---
-    def valid(self) -> tuple[bool, str]:
+    @staticmethod
+    def _replay(blocks):
+        ledger = Ledger()
         prev = "0" * 64
-        for b in self.blocks:
+        for n, b in enumerate(blocks):
+            if b.index != n:
+                return None, f"block {n}: wrong index {b.index}"
             if b.prev_hash != prev:
-                return False, f"block {b.index}: broken link"
+                return None, f"block {b.index}: broken link"
             if not b.hash().startswith("0" * DIFFICULTY):
-                return False, f"block {b.index}: bad PoW"
+                return None, f"block {b.index}: bad PoW"
             for tx in b.txs:
-                ok, why = wallets.verify_tx(tx)
-                if not ok and not (tx["from_wallet"] == FAUCET and tx["memo"].startswith("faucet")):
-                    return False, f"block {b.index}: bad tx {tx['txid'][:8]} ({why})"
+                try:
+                    ledger.apply(tx)
+                except ValueError as e:
+                    return None, f"block {b.index}: bad tx {str(tx.get('txid', '?'))[:8]} ({e})"
             prev = b.hash()
-        return True, "ok"
+        return ledger, "ok"
+
+    def valid(self) -> tuple[bool, str]:
+        with self.lock:
+            ledger, why = self._replay(self.blocks)
+            return ledger is not None, why
 
     def balances(self) -> dict:
-        out = {}
-        for b in self.blocks:
-            for tx in b.txs:
-                out[tx["from_wallet"]] = out.get(tx["from_wallet"], 0) - tx["amount"]
-                out[tx["to_wallet"]] = out.get(tx["to_wallet"], 0) + tx["amount"]
-        return out
+        with self.lock:
+            return {a: v for a, v in self.ledger.balances.items() if a != FAUCET}
 
     def balance(self, wallet: str) -> int:
-        return self.balances().get(wallet, 0)
+        with self.lock:
+            return self.ledger.balances.get(wallet, 0)
 
     def all_txs(self) -> list:
-        return [tx for b in self.blocks for tx in b.txs]
+        with self.lock:
+            return [tx for b in self.blocks for tx in b.txs]
 
     def find_tx_by_id(self, txid: str):
         """The tx (if any) with this txid, inside its mined block."""
-        for b in self.blocks:
-            for tx in b.txs:
-                if tx["txid"] == txid:
-                    return tx, b
+        with self.lock:
+            for b in reversed(self.blocks):
+                for tx in b.txs:
+                    if tx["txid"] == txid:
+                        return tx, b
         return None, None
 
 
 if __name__ == "__main__":
-    selftest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selftest-chain.json")
-    if os.path.exists(selftest):
-        os.remove(selftest)
-    c = Chain(selftest)
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    wallets.WALLET_DIR = os.path.join(tmp, "wallets")
+    c = Chain(os.path.join(tmp, "chain.json"))
     c.genesis()
-    w1 = wallets.load_or_create("chain-selftest-a")
-    w2 = wallets.load_or_create("chain-selftest-b")
-    fund_a = c.new_tx(FAUCET, w1.address, 10, "faucet:selftest")
-    c.add_tx(fund_a)
+    w1 = wallets.fund(c, "chain-selftest-a", 10)
+    w2 = wallets.fund(c, "chain-selftest-b", 0)
     tx = c.new_tx(w1.address, w2.address, 10, "test")
-    wallets.sign_tx(tx, w1)
+    wallets.sign_tx(tx, w1, c)
     c.add_tx(tx)
     t0 = time.time()
-    blk = c.mine()
+    c.mine()
     dt = time.time() - t0
     assert c.valid()[0]
     assert c.balance(w2.address) == 10
+    reopened = Chain(c.path)
+    assert reopened.balance(w2.address) == 10
     print(f"self-test ok: mined block in {dt:.2f}s, balance {c.balance(w2.address)}, "
-          f"blocks={len(c.blocks)}; signed tx accepted, faucet unsigned ok")
+          f"blocks={len(c.blocks)}; chain reloads and replays clean")
     assert dt < 1.0, "block too slow: lower DIFFICULTY"
