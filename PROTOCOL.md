@@ -110,6 +110,12 @@ spent; a txid pays once. Challenges live 300 s; at most 10,000 are open.
    rest back to the buyer. The server also settles paid channels by itself 20
    blocks before they expire. An unsettled channel can be refunded in full by
    the buyer from its `expires` height on.
+6. Near expiry: a seller refuses ticks once the channel is within 20 blocks of
+   `expires` (`402`, "too close to settle"). Blocks are cheap, so a buyer could
+   still mine past the settler; therefore, when a `channel_refund` reaches the
+   node, the node first settles the channel if it is the seller and was paid
+   on it, and otherwise holds the refund up to 6 s (`PAYMESH_REFUND_HOLD_S`) so
+   a seller running apart can settle first. Whichever is mined first counts.
 
 ## 2. Other endpoints
 
@@ -180,3 +186,26 @@ and starts with `00` (proof of work, difficulty 2). The server is the only
 miner; a miner thread puts every pending tx into its next block, and `POST /tx`
 answers once the tx is mined. Every 500 blocks the ledger is checkpointed to
 `chain.json.ckpt` (tip hash + ledger) to make restarts fast.
+
+### Durability (`durable.py`)
+
+| file | written | fsync (`PAYMESH_FSYNC=safe`, the default) |
+|---|---|---|
+| `chain.json` | one appended line per block | before `mine()` returns, so before any answer |
+| `chain.json.ckpt`, a full chain rewrite | temp file + rename | before the rename |
+| seller channel log | one appended line per tick, before the call is served | every 50 ms |
+| new wallet seed | temp file + rename | before the rename |
+| buyer channel seed | temp file + rename, before the deposit tx is sent | before the rename |
+
+`strict` fsyncs every write, ticks included; `off` none. Every write
+reaches the OS before the call that depends on it returns, so a killed process
+loses nothing; fsync only matters if the OS itself loses its cache. On open,
+a last line that a crash cut off is cut away (a complete record that only lost
+its newline gets it back), so the next append starts on a clean line.
+Measured on this machine (`bench.py 50 1000`, the same code back to back, calls/s):
+
+| policy | on-chain | channel | 8 agents |
+|---|---|---|---|
+| off | 208 | 1,827 | 2,689 |
+| safe | 196 | 1,708 | 2,544 |
+| strict | 185 | 1,074 | 1,611 |

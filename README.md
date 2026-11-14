@@ -70,9 +70,9 @@ takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
 ## Guarantees, each covered by a test
 
-`py -3 -m unittest discover -s tests` (54 tests: attacks, channels, HTTP end
-to end, client SDK, a separate seller API, x402 headers, seeded fuzzing, wallets at rest).
-`py -3 attacks.py` runs 22 attacks against a scratch node and shows each refused.
+`py -3 -m unittest discover -s tests` (64 tests: attacks, channels, HTTP end
+to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
+`py -3 attacks.py` runs 27 attacks against a scratch node and shows each refused.
 `py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
@@ -91,10 +91,17 @@ to end, client SDK, a separate seller API, x402 headers, seeded fuzzing, wallets
 * **Channel money is safe.** The seller can only claim ticks the buyer
   revealed; signed channel terms can't be altered; an unsettled channel
   refunds to the buyer after expiry, and the server settles paid channels
-  before that.
+  before that. No ticks are taken within 20 blocks of expiry, and a buyer who
+  spends a channel then races to refund it loses: the node settles first for
+  its own channels and holds the refund 6 s for a seller running apart.
 * **The chain file is checked on load.** Every block is replayed through the
-  same rules, so an edited history is refused; a block cut off by a crash is
-  dropped cleanly.
+  same rules, so an edited history is refused.
+* **A crash loses nothing that was answered.** A block is on disk (fsync)
+  before its tx is answered "mined"; a channel tick is written before the call
+  is served, and fsynced within 50 ms (`PAYMESH_FSYNC=strict`: before). A
+  record cut off mid-write is cut away on the next start, never read as data;
+  a test cuts files at every point of their last record and kills a writer
+  process 12 times mid-run, and an attack kills the node and replays a word.
 * **The HTTP surface holds.** Wallet names can't escape `wallets/`, bodies
   are size-capped, bad input gets `400` (never a crash: 1,000 fuzzed txs and
   315 fuzzed payment headers per run), a tx can't carry fields beyond its
@@ -122,6 +129,7 @@ to end, client SDK, a separate seller API, x402 headers, seeded fuzzing, wallets
 | `chain.py` | ledger rules, blocks, PoW, append-only `chain.json` |
 | `wallets.py` | one-time keys (WOTS, Lamport for old keys), rotation, signing |
 | `channels.py` | PayWord payment channels: buyer hash chain, seller log |
+| `durable.py` | append-only logs, atomic replaces, fsync policy (`PAYMESH_FSYNC`), torn-tail repair |
 | `paymesh_x402.py` | x402 v2 wire format: `PAYMENT-REQUIRED` / `-SIGNATURE` / `-RESPONSE` for the `paymesh` scheme |
 | `paywall.py` | 402 challenges and on-chain payment checks |
 | `server.py` | demo paid API: prices, `/tx`, `/account`, `/faucet`, `/stats`, channel routes, miner, rate limits |
