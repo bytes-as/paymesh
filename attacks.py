@@ -72,6 +72,13 @@ def run(node: str, restart=None) -> list:
     t4 = ch.Chain.new_tx(victim.wallet.address, me.wallet.address, 50, "forged")
     t4.update(next_key="e" * 64, sig=["ab" * 32] * 67)
     attempt("forge a victim's signature", lambda: post(t4), no)
+    # WOTS v2: a signature is bound to its key's public seed and to each chain position
+    t5 = signed(me, seller, 1, "wots2")
+    attempt("strip the public seed off a WOTS v2 signature to pass it as v1",
+            lambda: post(dict(t5, sig=t5["sig"][1:])), lambda c, b: c == 400 and "not signed by" in str(b))
+    attempt("move a WOTS v2 signature under another key's public seed",
+            lambda: post(dict(t5, sig=[victim.wallet.key(0)[2].hex()] + t5["sig"][1:])),
+            lambda c, b: c == 400 and "not signed by" in str(b))
     attempt("call a paid route without paying", lambda: me._req("/premium/price"), lambda c, b: c == 402)
     attempt("pay with a made-up txid", lambda: me._req("/premium/price", headers={"X-Payment": "ab" * 32}),
             lambda c, b: c == 402)

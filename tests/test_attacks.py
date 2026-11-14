@@ -200,7 +200,7 @@ class SignatureAttacks(Scratch):
         by_key = {}
         for tx in self.c.all_txs():
             if tx.get("from_wallet") == victim_addr and tx.get("sig"):
-                by_key.setdefault(wallets.signer_key(tx), []).append((wallets._wots_digits(wallets._msg_digest(tx)), tx["sig"]))
+                by_key.setdefault(wallets.signer_key(tx), []).append((wallets.sig_digits(tx), tx["sig"]))
         for revealed in by_key.values():
             for n in range(tries // max(1, len(by_key))):
                 tx = self.c.new_tx(victim_addr, to, 50, f"forged-{n}")
