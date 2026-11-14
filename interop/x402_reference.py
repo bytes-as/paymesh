@@ -7,7 +7,7 @@ from a separate venv (never installed into paymesh, not run by check.py):
     %TEMP%\\x402ref\\Scripts\\python.exe -m pip install "x402[requests]==2.27.0"
     %TEMP%\\x402ref\\Scripts\\python.exe interop\\x402_reference.py
 
-Last run: x402 2.27.0, REFERENCE INTEROP OK (2026-11-14).
+Last run: x402 2.27.0, REFERENCE INTEROP OK (2026-11-14, with fees).
 """
 import json
 import os
@@ -105,7 +105,8 @@ def main():
                                  "errorReason": decode_payment_response_header(r.headers["PAYMENT-RESPONSE"]).error_reason}
         print(json.dumps(out, indent=1))
         ok = (out["paid_by_reference_client"]["status"] == 200 and out["paid_by_reference_client"]["success"]
-              and out["balance_after"] == 95 and out["channel_via_reference_encoder"]["status"] == 200
+              and out["balance_after"] == 94 and  # 100 - 5 - the 1 PMX fee
+              out["channel_via_reference_encoder"]["status"] == 200
               and out["channel_replay"]["status"] == 402)
         print("REFERENCE INTEROP OK" if ok else "REFERENCE INTEROP FAILED")
         return 0 if ok else 1
