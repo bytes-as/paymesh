@@ -18,10 +18,12 @@
 <p>This page runs on another site than the API. It signs WOTS v2 payments in JavaScript (js/paymesh.js) and pays
 an x402 route; the API's other routes stay closed to it.</p>
 <label>API</label><input id="api" value="http://127.0.0.1:8402">
+<label>a second seller, running apart (for the hub)</label><input id="shop" value="http://127.0.0.1:8404">
 <label>this page's wallet (kept in this browser's localStorage, test coins only)</label><input id="addr" readonly>
 <div>
   <button id="buy">Buy /premium/price (tx)</button>
   <button id="fast">Buy via a channel (fast path)</button>
+  <button id="hub">Hub: one deposit, two sellers</button>
   <button id="mint" class="alt">Try to mint coins (GET /faucet)</button>
   <button id="peek" class="alt">Try to read /account</button>
 </div>
@@ -65,6 +67,23 @@ an x402 route; the API's other routes stay closed to it.</p>
   }
   document.getElementById("buy").onclick = () => buy();
   document.getElementById("fast").onclick = () => buy({ channelTicks: 50 });
+  document.getElementById("hub").onclick = async () => {
+    const opts = { channelTicks: 60, hub: true };
+    const shop = document.getElementById("shop").value.replace(/\/+$/, "");
+    for (const [base, path] of [[api(), "/premium/price"], [shop, "/forecast"]]) {
+      const t0 = performance.now();
+      try {
+        const r = await new Paymesh.Client(base, wallet, save, opts).get(path);
+        const ms = (performance.now() - t0).toFixed(0);
+        const ch = Object.entries(wallet.channels).find(([seller, c]) => r.tx ? c.id === r.tx.txid : true);
+        const left = ch ? `hub channel ${ch[1].id.slice(0, 10)}… ${ch[1].spent}/${ch[1].n}` : "";
+        log(r.paid ? "ok" : "no", `${r.paid ? "PAID" : "NOT PAID"} ${r.status} via ${r.via} at ${base}${path} | ${left} | ${ms} ms | next key ${wallet.nextIndex}`
+          + (r.paid ? "" : ` | ${(r.receipt && (r.receipt.errorMessage || r.receipt.errorReason)) || ""}`));
+      } catch (e) {
+        log("no", `ERROR ${e.message}`);
+      }
+    }
+  };
   async function forbidden(label, path) {
     try {
       const r = await fetch(api() + path, { credentials: "omit" });
