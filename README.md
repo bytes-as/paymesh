@@ -139,7 +139,8 @@ Runnable example: `py -3 examples/weather_api.py`.
 
 ## Numbers
 
-`py -3 bench.py 100 2000`, on a separate server (never the live one), this machine:
+`py -3 bench.py 100 2000`, on a separate server (never the live one), this machine
+(20 logical CPUs, Windows, Python 3.14) while otherwise idle, 2026-11-14:
 
 | | on-chain | channel | 8 agents, channels |
 |---|---|---|---|
@@ -153,12 +154,18 @@ calls per second (pending txs share blocks). The cost of a paid tx doesn't
 grow with the chain (blocks are appended), and a restart at 10,000 blocks
 takes 0.38 s (ledger checkpoints; a full check runs in the background).
 
+Numbers move with the machine's load. On 2026-11-15, with the CPU about 30 % busy with
+other programs, the same command gave a median of 172 / 1,713 / 1,802 calls per second
+over three runs, and the last pushed version (`cf0848d`), run alternately with it, gave
+162 / 1,575 / 1,628. The features added since then cost nothing measurable.
+
 ## Guarantees, each covered by a test
 
 `py -3 -m unittest discover -s tests` (135 tests: attacks, channels, HTTP end
 to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded fuzzing, wallets at rest).
 `py -3 attacks.py` runs 50 attacks against a scratch node and shows each refused.
-`py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about 10 s.
+`py -3 check.py` runs everything (self-tests, suite, attacks, a quick benchmark) in about two
+minutes, most of it the crash, fuzz and launcher tests.
 
 * **Keys are one-time and rotate every tx.** A signature can't be reused or
   extended into a forgery; a spent key never verifies again. New keys are
@@ -181,7 +188,7 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
   PMX is conserved (minted = held + locked + burned).
 * **One hub deposit pays many sellers, each word once.** The hub keeps one
   counter per channel: a word spent at one seller is refused at every other,
-  and the hub's single close pays each seller exactly what it was credited
+  and its payouts and its close pay each seller exactly what it was credited
   (the ledger checks the splits add up to what the buyer revealed).
 * **Channel money is safe.** The seller can only claim ticks the buyer
   revealed; signed channel terms can't be altered; an unsettled channel
@@ -204,10 +211,17 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
   315 fuzzed payment headers per run), a tx can't carry fields beyond its
   kind's, clients over their rate limit get `429`, and the explorer escapes
   everything it shows.
+* **Browsers can pay, and only pay.** Paid routes answer any origin with the x402
+  headers exposed; every other route refuses a request a browser marks as cross-site,
+  so a page can't mint, post txs, open channels through `/tx` or read accounts
+  (`tests/test_cors.py`, 4 attacks). `js/paymesh.js` signs byte for byte as Python
+  does (`tests/test_js_client.py` compares them under Node.js).
+* **A facilitator settles a payment once.** `/settle` answers `success` for a
+  payment once; the settled mark is on disk before the answer, so a restart
+  doesn't forget it.
 * **Checkpoints can't hide anything.** A checkpoint that doesn't match the
   chain is ignored; one edited to lie is caught by the background full check,
   and the node then refuses txs (`/health` answers 503).
-
 * **Hub sellers are paid on schedule, once.** A hub channel's sellers get
   `channel_payout`s while the channel stays open (every 60 s, or at 50 PMX owed;
   `PAYMESH_HUB_PAYOUT_S` / `_MIN`). The chain records what was paid, so no tick
@@ -226,6 +240,15 @@ to end, client SDK, a separate seller API, x402 headers, crash recovery, seeded 
   unless created with `wallet.py new <name> --encrypt` (scrypt + HMAC-SHA256,
   passphrase from `PAYMESH_PASSPHRASE`).
 * Rate limits are per client IP, so clients behind one address share them.
+* A browser wallet (`js/paymesh.js`, the demo page) keeps its seed in plain text in
+  the page's `localStorage`. A page can't read `/account` or post `/tx`, so after a
+  payment is refused once it has signed, the wallet locks rather than reuse that
+  one-time key; recovering it takes its seed and a script (the demo just makes a new one).
+* The facilitator settles hub channels only (it holds no seller's key to close a
+  direct one) and does not take the native `X-Payment` / `X-Channel` headers.
+* Tested here on Windows with Python 3.14 only. `.github/workflows/check.yml` runs
+  `check.py` on Ubuntu and Windows with Python 3.10 and 3.13 once the repo is pushed;
+  macOS has never been run.
 * x402: v2 only, no v1 (`X-PAYMENT`, which here is the native txid header). Paid routes
   are CORS-open for browser clients; other routes refuse other sites (PROTOCOL 0c). The node is
   also an x402 facilitator (`/verify`, `/settle`, `/supported`) for resource servers
