@@ -133,6 +133,7 @@ class KilledWriter(unittest.TestCase):
                 p.kill()  # TerminateProcess: no cleanup, no flush
                 p.wait()
                 t.join(5)
+                p.stdout.close()
                 kills += 1
                 for line in seen:
                     kind, n = line.split()

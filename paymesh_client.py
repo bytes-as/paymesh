@@ -11,17 +11,16 @@ and the price of each route is learned from its first 402. The channel's state
 (secret seed, ticks spent) is kept beside the wallet, so an agent can stop and
 resume. Stdlib only.
 """
-import http.client
 import json
 import math
 import os
-import socket
 import threading
 import urllib.parse
 
 import chain as ch
 import channels
 import durable
+import httppool
 import wallets
 import paymesh_x402 as x402
 class PaymentError(Exception):
@@ -43,29 +42,30 @@ class Client:
         self.channel: channels.BuyerChannel | None = None
         self.terms: dict | None = None
         self._lock = threading.Lock()
+        self._pools: dict = {}  # base URL -> kept-alive connections
         self._calls = 0
         self._load_channel()
 
     # --- HTTP ---
-    def _conn(self, base):
-        """This thread's kept-alive connection to `base`. Connect blocking, then set the
-        timeout: on Windows a timed connect costs ~15 ms per request."""
-        conns = self._tl.__dict__.setdefault("conns", {})
-        c = conns.get(base)
-        if c is None:
-            u = urllib.parse.urlsplit(base)
-            c = http.client.HTTPConnection(u.hostname, u.port or 80)
-            c.sock = socket.create_connection((u.hostname, u.port or 80))
-            c.sock.settimeout(self.timeout)
-            c.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            conns[base] = c
-            self._tl.fresh = True
-        return c
+    def _pool(self, base) -> httppool.Pool:
+        with self._lock:
+            p = self._pools.get(base)
+            if p is None:
+                p = self._pools[base] = httppool.Pool(base, self.timeout)
+            return p
 
-    def _drop(self, base):
-        c = self._tl.__dict__.get("conns", {}).pop(base, None)
-        if c is not None:
-            c.close()
+    def close(self):
+        """Close this client's connections (also done when it is garbage-collected)."""
+        with self._lock:
+            pools, self._pools = list(self._pools.values()), {}
+        for p in pools:
+            p.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def _node(self, path, data=None, headers=None):
         return self._req(path, data, headers, base=self.node)
@@ -78,27 +78,13 @@ class Client:
         body = json.dumps(data).encode() if data is not None else None
         h = {"Content-Type": "application/json"} if body else {}
         h.update(headers or {})
-        for _ in range(2):
-            self._tl.fresh = False
-            c = self._conn(base)
-            reused = not self._tl.fresh
-            try:
-                c.request("POST" if body is not None else "GET", urllib.parse.urlsplit(base).path + path, body=body, headers=h)
-                r = c.getresponse()
-                raw = r.read().decode()
-                self._tl.headers = r.headers  # x402 headers of the last answer on this thread
-                if r.will_close:
-                    self._drop(base)
-                break
-            except (http.client.HTTPException, OSError):
-                self._drop(base)
-                if not reused:  # a fresh connection failed: the server is down
-                    raise
-                # the server closed an idle kept-alive connection: retry once on a new one
+        status, hdrs, raw = self._pool(base).request("POST" if body is not None else "GET", path, body, h)
+        self._tl.headers = hdrs  # x402 headers of the last answer on this thread
+        raw = raw.decode()
         try:
-            return r.status, json.loads(raw or "null")
+            return status, json.loads(raw or "null")
         except json.JSONDecodeError:
-            return r.status, {"error": raw}
+            return status, {"error": raw}
 
     def _ledger(self) -> "_Remote":
         """The server's view of this wallet: balance, current key, chain height."""

@@ -42,7 +42,7 @@ class SellerApart(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.paywall.stop.set()
+        cls.paywall.close()
         cls.httpd.shutdown()
         cls.httpd.server_close()
         cls.node_srv.settler_stop.set()
@@ -111,6 +111,7 @@ class SellerOffline(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls.paywall.close()
         cls.httpd.shutdown()
         cls.httpd.server_close()
         cls.node_srv.settler_stop.set()

@@ -16,25 +16,15 @@ Stdlib only.
 import http.client
 import json
 import os
-import socket
 import threading
 import time
 import urllib.parse
 
 import channels
+import httppool
 import paywall as _pw
 import wallets
 import paymesh_x402 as x402
-def _conn(u, timeout):
-    """A kept-alive connection to the node: connect blocking, then the timeout (a timed connect
-    costs ~15 ms on Windows), and TCP_NODELAY (no Nagle wait on small requests)."""
-    c = http.client.HTTPConnection(u.hostname, u.port or 80)
-    c.sock = socket.create_connection((u.hostname, u.port or 80))
-    c.sock.settimeout(timeout)
-    c.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    return c
-
-
 class _Node:
     """Just enough of a chain for paywall.py and channels.py, read from the node over HTTP."""
 
@@ -44,27 +34,17 @@ class _Node:
         self.url = url.rstrip("/")
         self.timeout = timeout
         self.lock = threading.RLock()
-        self._tl = threading.local()
+        self.pool = httppool.Pool(self.url, timeout)  # kept-alive connections, shared by all threads
         self._channels: dict = {}
         self.ledger = self  # channels.py reads chain.ledger.channels
         self.channels = self
 
     def _get(self, path):
-        u = urllib.parse.urlsplit(self.url)
-        for attempt in range(2):
-            c = getattr(self._tl, "c", None)
-            if c is None:
-                c = self._tl.c = _conn(u, self.timeout)
-            try:
-                c.request("GET", u.path + path)
-                r = c.getresponse()
-                body = r.read().decode()
-                return r.status, json.loads(body or "null")
-            except (http.client.HTTPException, OSError):
-                c.close()
-                self._tl.c = None
-                if attempt:
-                    raise
+        status, _, body = self.pool.request("GET", path)
+        return status, json.loads(body.decode() or "null")
+
+    def close(self):
+        self.pool.close()
 
     def post(self, path, obj, keep_alive: bool = False):
         """keep_alive: reuse this thread's connection (hub claims, one per paid call). A reused
@@ -72,20 +52,8 @@ class _Node:
         reached the node. Txs keep a fresh connection: never sent twice."""
         u = urllib.parse.urlsplit(self.url)
         if keep_alive:
-            for attempt in range(2):
-                c = getattr(self._tl, "pc", None)
-                fresh = c is None
-                if fresh:
-                    c = self._tl.pc = _conn(u, self.timeout)
-                try:
-                    c.request("POST", u.path + path, body=json.dumps(obj), headers={"Content-Type": "application/json"})
-                    r = c.getresponse()
-                    return r.status, json.loads(r.read().decode() or "null")
-                except (http.client.HTTPException, OSError):
-                    c.close()
-                    self._tl.pc = None
-                    if fresh or attempt:
-                        raise
+            status, _, body = self.pool.request("POST", path, json.dumps(obj).encode(), {"Content-Type": "application/json"})
+            return status, json.loads(body.decode() or "null")
         c = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=self.timeout)
         try:
             c.request("POST", u.path + path, body=json.dumps(obj), headers={"Content-Type": "application/json"})
@@ -259,6 +227,11 @@ class Paywall:
                                                                              hub=self.node.hub),
                                          error=body["error"] if refused else "PAYMENT-SIGNATURE header is required")
         return False, 402, body, out + [(x402.REQUIRED, x402.encode(required))]
+
+    def close(self):
+        """Stop the settler thread and close the connections to the node."""
+        self.stop.set()
+        self.node.close()
 
     def settle(self, cid: str) -> dict:
         signer = _Signer(self.node, self.wallet.address)
