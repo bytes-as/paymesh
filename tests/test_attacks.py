@@ -98,12 +98,36 @@ class LedgerAttacks(Scratch):
         seller = self.funded("seller", 0)
         self.pay(buyer, seller.address, 5)
         with open(self.c.path) as f:
-            raw = json.load(f)
-        raw["blocks"][-1]["txs"][0]["amount"] = 1  # rewrite history
+            lines = f.read().splitlines()
+        last = json.loads(lines[-1])
+        last["txs"][0]["amount"] = 1  # rewrite history
+        lines[-1] = json.dumps(last)
         with open(self.c.path, "w") as f:
-            json.dump(raw, f)
+            f.write("\n".join(lines) + "\n")
         with self.assertRaises(ValueError):
             ch.Chain(self.c.path)
+
+    def test_a_block_cut_off_by_a_crash_is_dropped_cleanly(self):
+        buyer = self.funded("buyer", 100)
+        seller = self.funded("seller", 0)
+        self.pay(buyer, seller.address, 5)
+        good = ch.Chain(self.c.path)
+        with open(self.c.path, "a") as f:
+            f.write('{"index": 99, "timestamp": 1, "tx')  # power cut mid-append
+        again = ch.Chain(self.c.path)
+        self.assertEqual(len(again.blocks), len(good.blocks))
+        self.assertEqual(again.balance(buyer.address), 95)
+        again.mine()  # appends after the trimmed line, still loadable
+        self.assertEqual(len(ch.Chain(self.c.path).blocks), len(good.blocks) + 1)
+
+    def test_a_format_2_chain_is_upgraded_in_place(self):
+        buyer = self.funded("buyer", 100)
+        with open(self.c.path, "w") as f:
+            json.dump({"format": 2, "blocks": [b.to_dict() for b in self.c.blocks]}, f)
+        up = ch.Chain(self.c.path)
+        self.assertEqual(up.balance(buyer.address), 100)
+        with open(self.c.path) as f:
+            self.assertEqual(json.loads(f.readline()), {"format": ch.FORMAT})
 
 
 class SignatureAttacks(Scratch):

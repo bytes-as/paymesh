@@ -31,7 +31,7 @@ FAUCET = "0" * 64  # only the faucet may send unsigned txs
 MAX_MEMO = 256
 FAUCET_MAX = 100  # PMX per faucet mint
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
-FORMAT = 2  # chain.json format: {"format": 2, "blocks": [...]}
+FORMAT = 3  # chain.json: a {"format": 3} line, then one block per line (append-only)
 
 
 def sha256_hex(s: str) -> str:
@@ -215,22 +215,57 @@ class Chain:
     # --- persistence ---
     def load(self):
         with open(self.path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+            text = f.read()
+        upgrade = False
+        try:  # format 1 (a list) or 2 (one object): a single JSON document
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            raw = None
         if isinstance(raw, list):
             raise ValueError(f"{self.path}: format 1 chain (before key rotation); archive it and start a new chain")
-        if raw.get("format") != FORMAT:
-            raise ValueError(f"{self.path}: unknown chain format {raw.get('format')}")
-        blocks = [Block(b["index"], b["timestamp"], b["txs"], b["prev_hash"], b["nonce"]) for b in raw["blocks"]]
+        if isinstance(raw, dict) and raw.get("format") == 2:
+            dicts, upgrade = raw["blocks"], True
+        else:
+            lines = text.split("\n")
+            head = json.loads(lines[0]) if lines and lines[0].strip() else {}
+            if head.get("format") != FORMAT:
+                raise ValueError(f"{self.path}: unknown chain format {head.get('format')}")
+            dicts, good = [], len(lines[0]) + 1
+            for n, line in enumerate(lines[1:], 1):
+                if not line.strip():
+                    continue
+                try:
+                    dicts.append(json.loads(line))
+                except json.JSONDecodeError:
+                    if n == len(lines) - 1:  # a block cut off by a crash mid-write: drop it
+                        print(f"[chain] dropping a partly written last block in {self.path}")
+                        with open(self.path, "r+b") as f:  # cut at the last newline, in bytes
+                            data = f.read()
+                            f.truncate(data.rstrip(b"\r\n").rfind(b"\n") + 1)
+                        break
+                    raise ValueError(f"{self.path}: line {n + 1} is not a block")
+                good += len(line) + 1
+        blocks = [Block(b["index"], b["timestamp"], b["txs"], b["prev_hash"], b["nonce"]) for b in dicts]
         ledger, why = self._replay(blocks)
         if ledger is None:
             raise ValueError(f"{self.path}: invalid chain: {why}")
         self.blocks, self.ledger, self.pledger, self.pending = blocks, ledger, copy.deepcopy(ledger), []
+        if upgrade:
+            self.save()  # rewrite once as format 3
 
     def save(self):
+        """Write the whole chain (genesis, upgrades). Mining appends instead."""
         tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"format": FORMAT, "blocks": [b.to_dict() for b in self.blocks]}, f)
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps({"format": FORMAT}) + "\n")
+            for b in self.blocks:
+                f.write(json.dumps(b.to_dict()) + "\n")
         os.replace(tmp, self.path)
+
+    def _append(self, b: Block):
+        """Add one block to the file: cost stays flat as the chain grows."""
+        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(b.to_dict()) + "\n")
 
     @classmethod
     def open_or_archive(cls, path=CHAIN_FILE):
@@ -295,7 +330,7 @@ class Chain:
             for tx in b.txs:
                 self.ledger.apply(tx)
             self.ledger.height = self.pledger.height = len(self.blocks)
-            self.save()
+            self._append(b)
             return b
 
     @staticmethod
