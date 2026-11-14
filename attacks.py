@@ -388,6 +388,35 @@ def run(node: str, restart=None) -> list:
         attempt("replay a channel word after the node was killed and restarted",
                 lambda: me._req("/premium/price", headers={"X-Channel": h}),
                 lambda c, b: first == 200 and c == 402 and "not after the last paid tick" in str(b))
+    if restart:  # hub payouts: the hub paid the sellers what the buyer spent, the channel stays open
+        restart(PAYMESH_HUB_PAYOUT_MIN="5", PAYMESH_HUB_PAYOUT_S="1")
+        pb = Client(node, "payout-refunder")
+        pb.faucet()
+        pb.open_hub(ticks=40, expires_in=chn.SellerBook.STOP_WITHIN + 4)
+        pcid = pb.channel.id
+        pb.get("/premium/price")
+        pb.get("/premium/price")  # 10 PMX spent: paid out to the seller at once
+        for _ in range(100):
+            if me._node(f"/channel/info?id={pcid}")[1].get("paid_ticks") == 10:
+                break
+            time.sleep(0.1)
+        exp = me._node(f"/channel/info?id={pcid}")[1]["expires"]
+        while height() < exp:
+            me._node(f"/faucet?address={'ee' * 32}")
+
+        def refund_whole_deposit():
+            led = pb._ledger()
+            r = led.new_tx(pb.wallet.address, pb.wallet.address, 40, "channel:refund")  # 30 is what is left
+            r.update(kind="channel_refund", channel=pcid)
+            wallets.sign_tx(r, pb.wallet, led)
+            return me._node("/tx", r)
+        # the hub's settler closes it before expiry; behind that, the ledger caps a refund at what
+        # was not paid out (tests/test_payout.py::test_refund_after_payouts_returns_only_the_rest)
+        attempt("refund the whole deposit after the hub paid the sellers out", refund_whole_deposit,
+                lambda c, b: c == 400 and ("minus what was paid out" in str(b) or "already settled" in str(b))
+                and me._node(f"/channel/info?id={pcid}")[1].get("paid") == 10)
+        pb.close()
+
     if restart:  # QA-PM-4 follow-up: force "not mined in time" (the node waits 0 s for the block)
         restart(PAYMESH_MINE_WAIT_S="0")
         o = fresh()
@@ -474,7 +503,7 @@ def main():
         mark = "REFUSED" if r["refused"] else "ACCEPTED (!)"
         if r["attack"].startswith("node still"):
             mark = "OK" if r["refused"] else "DOWN (!)"
-        print(f"{r['attack']:<{width}}  {mark:<12} {r['answer']}")
+        print(f"{r['attack']:<{width}}  {mark:<12} {r['answer']}" + ("" if r["refused"] else f"  {r['detail']}"))
     bad = [r for r in res if not r["refused"]]
     print(f"\n{len(res) - len(bad)}/{len(res)} as expected")
     return 1 if bad else 0
